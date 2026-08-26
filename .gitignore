@@ -7,12 +7,18 @@ data/music/**
 
 # Secrets and private deployment configuration
 .env
+*.env
+!.env.example
+secrets.env
+**/secrets.env
+/deploy/
 deploy/
 *.pem
 *.key
 **/id_ed25519
 **/id_rsa
 **/known_hosts
+**/.ssh/
 
 # Personal exports and reports
 vk-wishlist*.json
