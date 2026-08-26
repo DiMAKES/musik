@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/torwin-job/musik/player/internal/config"
@@ -31,9 +32,10 @@ type Item struct {
 }
 
 type Builder struct {
-	Idx *index.Index
-	Cfg config.Config
-	Rng *rand.Rand
+	Idx   *index.Index
+	Cfg   config.Config
+	Rng   *rand.Rand
+	rngMu sync.Mutex
 }
 
 type cand struct {
@@ -46,10 +48,10 @@ type cand struct {
 }
 
 type BuildOpts struct {
-	ExploreRatio   float64
-	Discover       bool // strong random/far, weak taste
-	PreferCluster  int  // -1 = any; otherwise soft boost same cluster
-	Size           int
+	ExploreRatio    float64
+	Discover        bool // strong random/far, weak taste
+	PreferCluster   int  // -1 = any; otherwise soft boost same cluster
+	Size            int
 	TransitionsFrom map[int64]float64 // toID → weight for edges from current
 }
 
@@ -57,11 +59,23 @@ func NewBuilder(idx *index.Index, cfg config.Config) *Builder {
 	return &Builder{Idx: idx, Cfg: cfg, Rng: rand.New(rand.NewSource(time.Now().UnixNano()))}
 }
 
+func (b *Builder) newRNG() *rand.Rand {
+	b.rngMu.Lock()
+	seed := b.Rng.Int63()
+	b.rngMu.Unlock()
+	return rand.New(rand.NewSource(seed))
+}
+
+func (b *Builder) RandomFloat64() float64 {
+	return b.newRNG().Float64()
+}
+
 func (b *Builder) Build(currentID int64, taste []float32, exclude map[int64]bool) []Item {
 	return b.BuildOpts(currentID, taste, exclude, BuildOpts{})
 }
 
 func (b *Builder) BuildOpts(currentID int64, taste []float32, exclude map[int64]bool, opts BuildOpts) []Item {
+	rng := b.newRNG()
 	n := b.Idx.Size()
 	if n == 0 {
 		return nil
@@ -128,7 +142,7 @@ func (b *Builder) BuildOpts(currentID int64, taste []float32, exclude map[int64]
 			rowAllowed[i] = i
 		}
 	} else {
-		rowAllowed = b.candidateRowsFast(n, curCluster, taste, opts.TransitionsFrom, exclude, forbidden)
+		rowAllowed = b.candidateRowsFast(rng, n, curCluster, taste, opts.TransitionsFrom, exclude, forbidden)
 		tasteSims = make([]float32, n)
 		curSims = make([]float32, n)
 		for _, i := range rowAllowed {
@@ -166,7 +180,7 @@ func (b *Builder) BuildOpts(currentID int64, taste []float32, exclude map[int64]
 		}
 		var score float32
 		if opts.Discover {
-			score = 0.15*tasteSims[i] + 0.15*curSims[i] + nb + tBoost + float32(b.Rng.Float64())*0.7
+			score = 0.15*tasteSims[i] + 0.15*curSims[i] + nb + tBoost + float32(rng.Float64())*0.7
 		} else {
 			score = 0.55*tasteSims[i] + 0.35*curSims[i] + nb + tBoost
 			if preferCluster >= 0 && m.ClusterID == preferCluster {
@@ -180,9 +194,9 @@ func (b *Builder) BuildOpts(currentID int64, taste []float32, exclude map[int64]
 			taste: tasteSims[i], cur: curSims[i], boost: nb,
 		})
 		if tasteSims[i] <= thresh || opts.Discover {
-			farScore := -tasteSims[i] + float32(b.Rng.Float64())*0.3
+			farScore := -tasteSims[i] + float32(rng.Float64())*0.3
 			if opts.Discover {
-				farScore = float32(b.Rng.Float64())
+				farScore = float32(rng.Float64())
 			}
 			farPool = append(farPool, cand{
 				row: i, score: farScore, taste: tasteSims[i], cur: curSims[i], explore: true, boost: nb,
@@ -327,7 +341,7 @@ func (b *Builder) BuildOpts(currentID int64, taste []float32, exclude map[int64]
 
 // candidateRowsFast builds a shortlist without a full N×D pass.
 func (b *Builder) candidateRowsFast(
-	n, curCluster int, taste []float32, transitions map[int64]float64,
+	rng *rand.Rand, n, curCluster int, taste []float32, transitions map[int64]float64,
 	exclude map[int64]bool, forbidden map[int]bool,
 ) []int {
 	seen := map[int]bool{}
@@ -364,7 +378,7 @@ func (b *Builder) candidateRowsFast(
 	}
 	sampled := make([]pair, 0, sampleN)
 	for tries := 0; tries < sampleN*3 && len(sampled) < sampleN; tries++ {
-		i := b.Rng.Intn(n)
+		i := rng.Intn(n)
 		if forbidden[i] {
 			continue
 		}
@@ -379,7 +393,7 @@ func (b *Builder) candidateRowsFast(
 		add(p.row)
 	}
 	for tries := 0; tries < 800 && len(seen) < topK+800; tries++ {
-		add(b.Rng.Intn(n))
+		add(rng.Intn(n))
 	}
 	rows := make([]int, 0, len(seen))
 	for r := range seen {
@@ -390,12 +404,13 @@ func (b *Builder) candidateRowsFast(
 
 // PickRandom returns a random track id not in exclude.
 func (b *Builder) PickRandom(exclude map[int64]bool) int64 {
+	rng := b.newRNG()
 	n := b.Idx.Size()
 	if n == 0 {
 		return 0
 	}
 	for tries := 0; tries < n*2; tries++ {
-		i := b.Rng.Intn(n)
+		i := rng.Intn(n)
 		id := b.Idx.MetaAt(i).ID
 		if !exclude[id] {
 			return id

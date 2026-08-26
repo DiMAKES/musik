@@ -191,6 +191,18 @@
         "responses": { "200": { "description": "ok" } }
       }
     },
+    "/api/metrics/weekly": {
+      "get": {
+        "summary": "Seven-day listening and recommendation outcomes",
+        "responses": { "200": { "description": "Listen, completion, diversity and explore/exploit rates" } }
+      }
+    },
+    "/api/metrics/recommendations": {
+      "get": {
+        "summary": "Recommendation latency and seven-day outcomes",
+        "responses": { "200": { "description": "In-memory p50/p95/p99 latency plus persisted impression outcomes" } }
+      }
+    },
     "/listen/{token}": {
       "get": {
         "security": [],

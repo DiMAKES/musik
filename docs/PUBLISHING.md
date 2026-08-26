@@ -18,10 +18,10 @@ git status --short
 
 Before committing, confirm that the staged list does not contain:
 
-- `.env`, `deploy/secrets.env`, `deploy/.ssh/`;
+- `.env`, private deployment configuration or SSH credentials;
 - `data/`, wishlist exports or music metadata;
 - APK/AAB files, Go binaries, logs or model caches;
-- site-specific nginx configuration.
+- site-specific reverse-proxy configuration.
 
 Then:
 

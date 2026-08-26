@@ -30,24 +30,33 @@
         <p class="tagline" id="maturity">твой локальный микс</p>
       </div>
       <nav class="tabs" aria-label="Разделы">
-        <button type="button" class="tab active" data-view="home">Главная</button>
+        <button type="button" class="tab active" data-view="home" aria-current="page">Главная</button>
         <button type="button" class="tab" data-view="player">Сейчас</button>
         <button type="button" class="tab" data-view="library">Библиотека</button>
         <button type="button" class="tab" data-view="profile">Профиль</button>
-        <button type="button" class="tab logout-tab" id="btn-logout" hidden>Выйти</button>
+        <button type="button" class="tab logout-tab" id="btn-logout" title="Выйти из аккаунта" hidden>Выйти</button>
       </nav>
     </header>
 
     <main>
       <section id="view-home" class="view active">
-        <div class="home-actions">
-          <button type="button" class="btn primary" id="btn-radio">▶ Радио</button>
-          <button type="button" class="btn" id="btn-share-radio" title="Ссылка для VLC / браузера / телефона">Поделиться</button>
-          <button type="button" class="btn" id="btn-refresh-mixes">
-            <span id="refresh-label">Обновить миксы</span>
-          </button>
-          <p class="status-line" id="job-status" hidden></p>
-          <p class="status-line" id="share-url-line" hidden></p>
+        <div class="home-intro">
+          <div class="home-copy">
+            <span class="eyebrow">Твоя музыка · твои правила</span>
+            <h1>Что послушаем?</h1>
+            <p>Запусти персональное радио или выбери настроение из коллекции ниже.</p>
+          </div>
+          <div class="home-actions">
+            <button type="button" class="btn primary hero-play" id="btn-radio"><span aria-hidden="true">▶</span> Запустить радио</button>
+            <button type="button" class="btn" id="btn-share-radio" title="Ссылка для VLC, браузера или телефона">Поделиться</button>
+            <button type="button" class="btn quiet" id="btn-refresh-mixes">
+              <span id="refresh-label">Обновить миксы</span>
+            </button>
+          </div>
+          <div class="home-status">
+            <p class="status-line" id="job-status" hidden></p>
+            <p class="status-line" id="share-url-line" hidden></p>
+          </div>
         </div>
 
         <section class="shelf">
@@ -164,19 +173,23 @@
 
         <section class="shelf">
           <div class="shelf-head"><h2>Открытия</h2></div>
-          <div class="shelf-row" id="discover-cards">
-            <button type="button" class="mix-card tone-b" id="btn-discover-new" data-tips="new">
-              <div class="cover-blob blob-a"></div>
-              <strong>Новые альбомы</strong>
-              <span>Что недавно попало в библиотеку</span>
-              <div class="mix-meta">смотреть</div>
-            </button>
-            <button type="button" class="mix-card tone-c" id="btn-discover-old" data-tips="old">
-              <div class="cover-blob blob-b"></div>
-              <strong>Из старого</strong>
-              <span>Забытое, но близко к вкусу</span>
-              <div class="mix-meta">смотреть</div>
-            </button>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="discover-cards" aria-label="Назад">‹</button>
+            <div class="shelf-row" id="discover-cards">
+              <button type="button" class="mix-card tone-b" id="btn-discover-new" data-tips="new">
+                <div class="cover-blob blob-a"></div>
+                <strong>Новые альбомы</strong>
+                <span>Что недавно попало в библиотеку</span>
+                <div class="mix-meta">смотреть</div>
+              </button>
+              <button type="button" class="mix-card tone-c" id="btn-discover-old" data-tips="old">
+                <div class="cover-blob blob-b"></div>
+                <strong>Из старого</strong>
+                <span>Забытое, но близко к вкусу</span>
+                <div class="mix-meta">смотреть</div>
+              </button>
+            </div>
+            <button type="button" class="shelf-nav next" data-for="discover-cards" aria-label="Вперёд">›</button>
           </div>
           <div id="tips-panel" class="tips-panel hidden"></div>
         </section>
@@ -252,7 +265,7 @@
         <div id="metrics-box" class="panel"></div>
         <div class="panel" id="share-box">
           <strong>Публичное радио</strong>
-          <p class="sub" style="margin:.35rem 0 .75rem">Непрерывный MP3-поток для VLC и любых плееров. Слушатели не меняют твой вкус.</p>
+          <p class="sub share-description">Непрерывный MP3-поток для VLC и любых плееров. Слушатели не меняют твой вкус.</p>
           <button type="button" class="btn" id="btn-share-radio-profile">Создать ссылку</button>
           <ul id="share-list" class="share-list"></ul>
         </div>

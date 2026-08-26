@@ -164,6 +164,19 @@ func (s *Server) handleWeeklyMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, m)
 }
 
+func (s *Server) handleRecommendationMetrics(w http.ResponseWriter, _ *http.Request) {
+	m, err := s.Store.WeeklyMetrics()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"window":     "7d",
+		"outcomes":   m,
+		"latency_ms": s.latency.Snapshot(),
+	})
+}
+
 func (s *Server) handleManifest(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/manifest+json")
 	_, _ = w.Write([]byte(`{

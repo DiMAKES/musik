@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +20,11 @@ import (
 
 func openTestServer(t *testing.T) *Server {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "musik-api-test.db")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db", "musik-api-test.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	bootstrap, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)
@@ -53,15 +61,25 @@ func openTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	cfg := config.Config{QueueSize: 6, AuthDisabled: true}
+	cfg := config.Config{
+		DBPath: path, QueueSize: 6, AuthDisabled: true,
+		ProfileFormingAt: 3, ProfileReadyAt: 8, ExploreRatio: 0.15,
+		DiscoverExploreRatio: 0.35, WorkerURL: "http://127.0.0.1:1",
+	}
 	idx := index.New(cfg)
 	rows := make([]db.TrackRow, 0, 3)
 	for _, id := range []int64{11, 22, 33} {
 		rows = append(rows, db.TrackRow{
-			ID: id, Path: filepath.Join(t.TempDir(), "missing.flac"),
-			Title: "Track", Artist: "Artist", Duration: 180,
+			ID: id, Path: filepath.Join(dir, "missing.flac"),
+			Title: "Track", Artist: "Artist", Album: "Album", Duration: 180,
 			Embedding: index.Float32Bytes([]float32{1, float32(id)}), Dim: 2,
 		})
+		if _, err := store.DB.Exec(
+			`INSERT INTO tracks(id, path, title, artist, album, duration) VALUES (?,?,?,?,?,?)`,
+			id, filepath.Join(dir, "missing.flac"), "Track", "Artist", "Album", 180,
+		); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := idx.Load(rows); err != nil {
 		t.Fatal(err)
@@ -138,4 +156,53 @@ func TestFixedSessionPreservesOrderAndStartPosition(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIndependentRadioSessionsRunConcurrently(t *testing.T) {
+	server := openTestServer(t)
+	const clients = 8
+	start := make(chan struct{})
+	errs := make(chan string, clients)
+	ids := make(chan string, clients)
+	var wg sync.WaitGroup
+	wg.Add(clients)
+	for i := 0; i < clients; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest("POST", "/api/radio/start", bytes.NewReader([]byte(`{}`)))
+			rec := httptest.NewRecorder()
+			server.handleRadioStart(rec, req)
+			if rec.Code != 200 {
+				errs <- rec.Body.String()
+				return
+			}
+			var body struct {
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				errs <- err.Error()
+				return
+			}
+			ids <- body.SessionID
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(ids)
+	for err := range errs {
+		t.Error(err)
+	}
+	seen := map[string]bool{}
+	for id := range ids {
+		if id == "" || seen[id] {
+			t.Fatalf("bad or duplicate session id %q", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != clients {
+		t.Fatalf("sessions=%d, want %d", len(seen), clients)
+	}
+	server.flushBackgroundIO()
 }

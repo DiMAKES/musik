@@ -160,7 +160,12 @@ function setSeekPct(pct) {
 
 function setView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
+  document.querySelectorAll(".tab[data-view]").forEach((b) => {
+    const active = b.dataset.view === name;
+    b.classList.toggle("active", active);
+    if (active) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
   const el = document.getElementById("view-" + name);
   if (el) el.classList.add("active");
   if (name === "home") {
@@ -1038,7 +1043,11 @@ async function showTips(kind) {
 
 function setLibTab(tab) {
   libTab = tab;
-  document.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.lib === tab));
+  document.querySelectorAll(".seg-btn").forEach((b) => {
+    const active = b.dataset.lib === tab;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", String(active));
+  });
   const ph = $("lib-filter");
   if (ph) {
     ph.placeholder =
@@ -1177,8 +1186,8 @@ async function loadProfile() {
   const conf = Math.round((p.confidence || 0) * 100);
   $("profile-box").innerHTML = `
     <div><strong>${escapeHtml(p.maturity)}</strong> · уверенность ${conf}%</div>
-    <div style="margin-top:.45rem;color:var(--muted)">${p.n_positive}/${p.ready_at} позитивных сигналов · explore ${Number(p.explore_ratio).toFixed(2)}</div>
-    <div style="margin-top:.85rem"><strong>Топ артисты</strong><br>${
+    <div class="profile-detail">${p.n_positive}/${p.ready_at} позитивных сигналов · explore ${Number(p.explore_ratio).toFixed(2)}</div>
+    <div class="profile-artists"><strong>Топ артисты</strong><br>${
       (p.top_artists || []).map((a) => `${escapeHtml(a.artist)} · ${a.count}`).join("<br>") || "—"
     }</div>`;
   $("metrics-box").innerHTML = `

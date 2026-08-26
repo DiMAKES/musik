@@ -64,6 +64,20 @@ func (s *Store) ensureSchema() error {
     completed      INTEGER NOT NULL DEFAULT 0,
     updated_at     TEXT NOT NULL
 );`,
+		`CREATE TABLE IF NOT EXISTS recommendation_impressions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    track_id        INTEGER NOT NULL,
+    position        INTEGER NOT NULL,
+    score           REAL NOT NULL DEFAULT 0,
+    cosine_taste    REAL NOT NULL DEFAULT 0,
+    cosine_current  REAL NOT NULL DEFAULT 0,
+    explore         INTEGER NOT NULL DEFAULT 0,
+    new_boost       INTEGER NOT NULL DEFAULT 0,
+    maturity        TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL DEFAULT '',
+    shown_at        TEXT NOT NULL
+);`,
 		`CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
@@ -144,6 +158,10 @@ func (s *Store) ensureSchema() error {
 );`,
 		`CREATE INDEX IF NOT EXISTS idx_history_weekday_action
 ON listening_history(weekday, action);`,
+		`CREATE INDEX IF NOT EXISTS idx_impressions_shown_at
+ON recommendation_impressions(shown_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_impressions_session_track
+ON recommendation_impressions(session_id, track_id, shown_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_playlists_kind_id
 ON playlists(kind, id DESC);`,
 	}
@@ -289,6 +307,67 @@ ON CONFLICT(track_id) DO UPDATE SET
   updated_at = excluded.updated_at`,
 		trackID, shown, skipEarly, completed, now)
 	return err
+}
+
+type RecommendationImpression struct {
+	SessionID     string
+	TrackID       int64
+	Position      int
+	Score         float64
+	CosineTaste   float64
+	CosineCurrent float64
+	Explore       bool
+	NewBoost      bool
+	Maturity      string
+	Mode          string
+}
+
+// InsertRecommendationImpressions records one visible queue in a single transaction.
+func (s *Store) InsertRecommendationImpressions(items []RecommendationImpression) error {
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`
+INSERT INTO recommendation_impressions(
+  session_id, track_id, position, score, cosine_taste, cosine_current,
+  explore, new_boost, maturity, mode, shown_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	statsStmt, err := tx.Prepare(`
+INSERT INTO rec_stats(track_id, shown, skipped_early, completed, updated_at)
+VALUES (?,1,0,0,?)
+ON CONFLICT(track_id) DO UPDATE SET
+  shown = shown + 1,
+  updated_at = excluded.updated_at`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer statsStmt.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, item := range items {
+		if _, err := stmt.Exec(
+			item.SessionID, item.TrackID, item.Position, item.Score,
+			item.CosineTaste, item.CosineCurrent, item.Explore, item.NewBoost,
+			item.Maturity, item.Mode, now,
+		); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if _, err := statsStmt.Exec(item.TrackID, now); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SaveProfile(context string, emb []byte) error {
@@ -826,7 +905,16 @@ type Metrics struct {
 	Skips7d         int     `json:"skips_7d"`
 	SkipRate7d      float64 `json:"skip_rate_7d"`
 	Completes7d     int     `json:"completes_7d"`
-	ExploreShown    int     `json:"explore_shown_approx"`
+	ExploreShown    int     `json:"explore_shown"`
+	ExploitShown    int     `json:"exploit_shown"`
+	ExploreSkips    int     `json:"explore_early_skips"`
+	ExploitSkips    int     `json:"exploit_early_skips"`
+	ExploreComplete int     `json:"explore_completes"`
+	ExploitComplete int     `json:"exploit_completes"`
+	ExploreSkipRate float64 `json:"explore_skip_rate"`
+	ExploitSkipRate float64 `json:"exploit_skip_rate"`
+	ExploreCompRate float64 `json:"explore_complete_rate"`
+	ExploitCompRate float64 `json:"exploit_complete_rate"`
 	UniqueArtists7d int     `json:"unique_artists_7d"`
 }
 
@@ -850,7 +938,54 @@ SELECT COUNT(DISTINCT t.artist)
 FROM listening_history h
 JOIN tracks t ON t.id = h.track_id
 WHERE h.ts >= datetime('now', '-7 days')`).Scan(&m.UniqueArtists7d)
-	_ = s.DB.QueryRow(`SELECT COALESCE(SUM(shown),0) FROM rec_stats`).Scan(&m.ExploreShown)
+	err = s.DB.QueryRow(`
+SELECT
+  COALESCE(SUM(CASE WHEN i.explore = 1 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN i.explore = 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN i.explore = 1 AND EXISTS (
+    SELECT 1 FROM listening_history h
+    WHERE h.session_id = i.session_id AND h.track_id = i.track_id
+      AND h.action = 'track_end' AND h.reason = 'skipped'
+      AND COALESCE(h.listened_sec,0) < 0.3 * COALESCE(h.duration_sec,1)
+      AND datetime(h.ts) >= datetime(i.shown_at)
+  ) THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN i.explore = 0 AND EXISTS (
+    SELECT 1 FROM listening_history h
+    WHERE h.session_id = i.session_id AND h.track_id = i.track_id
+      AND h.action = 'track_end' AND h.reason = 'skipped'
+      AND COALESCE(h.listened_sec,0) < 0.3 * COALESCE(h.duration_sec,1)
+      AND datetime(h.ts) >= datetime(i.shown_at)
+  ) THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN i.explore = 1 AND EXISTS (
+    SELECT 1 FROM listening_history h
+    WHERE h.session_id = i.session_id AND h.track_id = i.track_id
+      AND h.action = 'track_end'
+      AND (h.reason = 'completed' OR COALESCE(h.listened_sec,0) >= 0.8 * COALESCE(h.duration_sec,1))
+      AND datetime(h.ts) >= datetime(i.shown_at)
+  ) THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN i.explore = 0 AND EXISTS (
+    SELECT 1 FROM listening_history h
+    WHERE h.session_id = i.session_id AND h.track_id = i.track_id
+      AND h.action = 'track_end'
+      AND (h.reason = 'completed' OR COALESCE(h.listened_sec,0) >= 0.8 * COALESCE(h.duration_sec,1))
+      AND datetime(h.ts) >= datetime(i.shown_at)
+  ) THEN 1 ELSE 0 END), 0)
+FROM recommendation_impressions i
+WHERE datetime(i.shown_at) >= datetime('now', '-7 days')`).Scan(
+		&m.ExploreShown, &m.ExploitShown, &m.ExploreSkips, &m.ExploitSkips,
+		&m.ExploreComplete, &m.ExploitComplete,
+	)
+	if err != nil {
+		return m, err
+	}
+	if m.ExploreShown > 0 {
+		m.ExploreSkipRate = float64(m.ExploreSkips) / float64(m.ExploreShown)
+		m.ExploreCompRate = float64(m.ExploreComplete) / float64(m.ExploreShown)
+	}
+	if m.ExploitShown > 0 {
+		m.ExploitSkipRate = float64(m.ExploitSkips) / float64(m.ExploitShown)
+		m.ExploitCompRate = float64(m.ExploitComplete) / float64(m.ExploitShown)
+	}
 	return m, nil
 }
 

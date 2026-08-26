@@ -92,6 +92,7 @@ Content-Type: `application/json` (кроме stream/artwork).
 | GET | `/api/discover/albums` | new album tips |
 | GET | `/api/discover/resurfaced` | старый каталог |
 | GET | `/api/metrics/weekly` | skip-rate, listens, diversity |
+| GET | `/api/metrics/recommendations` | p50/p95/p99 latency и explore/exploit outcomes за 7 дней |
 
 ## Events `POST /api/events`
 

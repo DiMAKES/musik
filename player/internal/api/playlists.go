@@ -27,13 +27,13 @@ func (s *Server) handleDailyPlay(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no daily playlist", 404)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	ids := make([]int64, 0, len(pl.Tracks))
 	for _, t := range pl.Tracks {
 		ids = append(ids, t.TrackID)
 	}
 	sess := s.startFixedLocked(ids, "daily", pl.Name, "daily", 0, 0)
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	out := s.playResponse(sess)
 	out["playlist"] = pl
 	writeJSON(w, out)

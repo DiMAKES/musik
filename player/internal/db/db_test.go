@@ -176,3 +176,45 @@ func TestConcurrentWorkerAndEventWrites(t *testing.T) {
 		t.Fatalf("history=%d shown=%d, want %d each", histories, shown, writes)
 	}
 }
+
+func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
+	store, _ := openTestStore(t)
+	for id := int64(1); id <= 2; id++ {
+		if _, err := store.DB.Exec(
+			`INSERT INTO tracks(id, path, title) VALUES (?, ?, ?)`,
+			id, fmt.Sprintf("/track-%d.flac", id), fmt.Sprintf("Track %d", id),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.InsertRecommendationImpressions([]RecommendationImpression{
+		{SessionID: "s1", TrackID: 1, Position: 0, Explore: true, Score: 0.2},
+		{SessionID: "s1", TrackID: 2, Position: 1, Explore: false, Score: 0.8},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	duration := 100.0
+	skipped := 10.0
+	completed := 95.0
+	if _, err := store.InsertListen(1, "track_end", "test", "s1", "skipped", nil, &duration, &skipped); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertListen(2, "track_end", "test", "s1", "completed", nil, &duration, &completed); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := store.WeeklyMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.ExploreShown != 1 || metrics.ExploitShown != 1 {
+		t.Fatalf("shown explore/exploit=%d/%d, want 1/1", metrics.ExploreShown, metrics.ExploitShown)
+	}
+	if metrics.ExploreSkips != 1 || metrics.ExploitComplete != 1 {
+		t.Fatalf("outcomes explore skips=%d exploit completes=%d, want 1/1",
+			metrics.ExploreSkips, metrics.ExploitComplete)
+	}
+	if metrics.ExploreSkipRate != 1 || metrics.ExploitCompRate != 1 {
+		t.Fatalf("rates explore skip=%f exploit complete=%f, want 1/1",
+			metrics.ExploreSkipRate, metrics.ExploitCompRate)
+	}
+}

@@ -5,19 +5,14 @@ data/**
 data/music/**
 !data/music/.gitkeep
 
-# Secrets and local deploy credentials
+# Secrets and private deployment configuration
 .env
-deploy/secrets.env
-deploy/.ssh/
-deploy/.vendor/
+deploy/
 *.pem
 *.key
 **/id_ed25519
 **/id_rsa
 **/known_hosts
-
-# Site-specific infrastructure (keep generic *.example templates)
-deploy/nginx.*.conf
 
 # Personal exports and reports
 vk-wishlist*.json

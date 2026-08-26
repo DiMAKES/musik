@@ -40,12 +40,14 @@ type Server struct {
 	HTTP    *http.Client
 	Auth    *auth.Gate
 
-	mu             sync.Mutex
+	sessionsMu     sync.RWMutex
 	sessions       map[string]*PlaySession
 	shareListeners int32
 	loginLimiter   *auth.LoginLimiter
 	transMu        sync.RWMutex
 	transitions    map[int64]map[int64]float64 // from → to → weight
+	latency        *latencyRecorder
+	backgroundIO   chan func()
 
 	Warm          *StreamWarm
 	mobileFlight  *mobileFlight
@@ -64,7 +66,7 @@ func New(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile
 		Disabled:      cfg.AuthDisabled, // only explicit MUSIK_AUTH_DISABLED=1
 		SecureCookie:  cfg.SecureCookie,
 	})
-	return &Server{
+	s := &Server{
 		Cfg: cfg, Store: store, Idx: idx, Taste: tp,
 		Builder:      queue.NewBuilder(idx, cfg),
 		Static:       staticFS,
@@ -72,9 +74,32 @@ func New(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile
 		Auth:         gate,
 		sessions:     map[string]*PlaySession{},
 		loginLimiter: auth.NewLoginLimiter(5, time.Minute),
+		latency:      newLatencyRecorder(),
+		backgroundIO: make(chan func(), 256),
 		Warm:         newStreamWarm(8),
 		mobileFlight: &mobileFlight{},
 	}
+	go s.runBackgroundIO()
+	return s
+}
+
+func (s *Server) runBackgroundIO() {
+	for work := range s.backgroundIO {
+		work()
+	}
+}
+
+func (s *Server) enqueueBackgroundIO(work func()) {
+	if work == nil {
+		return
+	}
+	s.backgroundIO <- work
+}
+
+func (s *Server) flushBackgroundIO() {
+	done := make(chan struct{})
+	s.enqueueBackgroundIO(func() { close(done) })
+	<-done
 }
 
 func (s *Server) Handler() http.Handler {
@@ -131,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
 	mux.HandleFunc("GET /api/jobs", s.handleListJobs)
 	mux.HandleFunc("GET /api/metrics/weekly", s.handleWeeklyMetrics)
+	mux.HandleFunc("GET /api/metrics/recommendations", s.handleRecommendationMetrics)
 	mux.HandleFunc("GET /manifest.webmanifest", s.handleManifest)
 	mux.Handle("/", s.staticHandler())
 	var h http.Handler = mux
@@ -239,15 +265,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	mat := s.Taste.Maturity(s.Cfg.ProfileFormingAt, s.Cfg.ProfileReadyAt)
 	explore := s.Taste.EffectiveExplore(s.Cfg.ExploreRatio, s.Cfg.DiscoverExploreRatio, s.Cfg.ProfileFormingAt, s.Cfg.ProfileReadyAt)
+	s.sessionsMu.RLock()
+	sessionCount := len(s.sessions)
+	s.sessionsMu.RUnlock()
 	out := map[string]any{
 		"tracks": s.Idx.Size(), "dim": s.Idx.Dim(),
 		"taste_ready":      s.Taste.Ready(),
 		"maturity":         mat,
-		"sessions":         len(s.sessions),
+		"sessions":         sessionCount,
 		"explore":          explore,
 		"db":               s.Cfg.DBPath,
 		"worker_url":       s.Cfg.WorkerURL,
@@ -255,10 +282,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if sid := r.URL.Query().Get("session_id"); sid != "" {
 		if sess := s.getSession(sid); sess != nil {
+			sess.mu.Lock()
 			out["session_id"] = sess.ID
 			out["mode"] = sess.Mode
 			out["current"] = sess.Current
 			out["queue_len"] = len(sess.Queue)
+			sess.mu.Unlock()
 		}
 	}
 	writeJSON(w, out)
@@ -328,6 +357,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() { s.latency.Observe("similar", time.Since(started)) }()
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.Error(w, "bad id", 400)
@@ -338,44 +369,21 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not in index", 404)
 		return
 	}
-	sims := s.Idx.SimsTo(s.Idx.Vector(row))
 	type nb struct {
 		ID     int64   `json:"id"`
 		Artist string  `json:"artist"`
 		Title  string  `json:"title"`
 		Cosine float64 `json:"cosine"`
 	}
-	type pair struct {
-		i int
-		s float32
+	exclude := map[int64]bool{}
+	for _, cloneID := range s.Idx.CloneIDs(id) {
+		exclude[cloneID] = true
 	}
-	var all []pair
-	md5 := s.Idx.MetaAt(row).FileMD5
-	for i, sVal := range sims {
-		if i == row {
-			continue
-		}
-		m := s.Idx.MetaAt(i)
-		if md5 != "" && m.FileMD5 == md5 {
-			continue
-		}
-		all = append(all, pair{i, sVal})
-	}
-	for i := 0; i < len(all); i++ {
-		for j := i + 1; j < len(all); j++ {
-			if all[j].s > all[i].s {
-				all[i], all[j] = all[j], all[i]
-			}
-		}
-	}
-	limit := 10
-	if len(all) < limit {
-		limit = len(all)
-	}
-	out := make([]nb, 0, limit)
-	for _, p := range all[:limit] {
-		m := s.Idx.MetaAt(p.i)
-		out = append(out, nb{m.ID, m.Artist, m.Title, float64(p.s)})
+	pairs := s.Idx.TopK(s.Idx.Vector(row), 10, exclude)
+	out := make([]nb, 0, len(pairs))
+	for _, p := range pairs {
+		m := s.Idx.MetaAt(p.Row)
+		out = append(out, nb{m.ID, m.Artist, m.Title, float64(p.Score)})
 	}
 	writeJSON(w, out)
 }
@@ -447,9 +455,9 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.newSession("session")
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	startID := s.pickStartTrackLocked(sess, req.SeedTrackID)
 	sess.Current = startID
 	sess.Prev = 0
@@ -464,12 +472,12 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.requireSession(w, r, "")
 	if sess == nil {
 		return
 	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"session_id": sess.ID,
 		"current":    sess.Current, "mode": sess.Mode, "maturity": s.maturityLocked(), "queue": sess.Queue,
@@ -477,23 +485,23 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQueueRefresh(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.requireSession(w, r, "")
 	if sess == nil {
 		return
 	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	s.refreshQueueFor(sess, sess.Current, true)
 	writeJSON(w, map[string]any{"session_id": sess.ID, "queue": sess.Queue, "maturity": s.maturityLocked()})
 }
 
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.requireSession(w, r, "")
 	if sess == nil {
 		return
 	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	out := map[string]any{
 		"session_id": sess.ID,
 		"mode":       sess.Mode,
@@ -528,12 +536,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.requireSession(w, r, ev.SessionID)
 	if sess == nil {
 		return
 	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	ev.SessionID = sess.ID
 
 	switch ev.Type {

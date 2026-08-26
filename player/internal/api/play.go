@@ -124,6 +124,7 @@ func (s *Server) startFixedLocked(ids []int64, mode, name, kind string, startInd
 		pos = startIndex
 	}
 	sess := s.newSession(mode)
+	sess.mu.Lock()
 	sess.DailyIDs = ids
 	sess.DailyPos = pos
 	sess.PlaylistName = name
@@ -131,6 +132,8 @@ func (s *Server) startFixedLocked(ids []int64, mode, name, kind string, startInd
 	sess.Current = ids[pos]
 	s.excludeTrackLocked(sess, sess.Current)
 	s.rebuildDailyQueueFor(sess)
+	sess.mu.Unlock()
+	s.flushBackgroundIO()
 	return sess
 }
 
@@ -165,9 +168,9 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	if req.StartIndex != nil {
 		startIdx = *req.StartIndex
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.startFixedLocked(ids, "listen", name, "listen", startIdx, req.StartTrackID)
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	writeJSON(w, s.playResponse(sess))
 }
 
@@ -178,12 +181,12 @@ func (s *Server) handleSessionJump(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.requireSession(w, r, req.SessionID)
 	if sess == nil {
 		return
 	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	if len(sess.DailyIDs) == 0 {
 		http.Error(w, "нечего переключать — это не плейлист", 400)
 		return

@@ -11,34 +11,17 @@ import (
 	"github.com/torwin-job/musik/player/internal/index"
 )
 
-type simPair struct {
-	row int
-	sim float32
-}
-
 func (s *Server) topTrackSims(vec []float32, exclude map[int64]bool, limit int) []map[string]any {
 	if len(vec) == 0 || limit <= 0 {
 		return nil
 	}
-	sims := s.Idx.SimsTo(vec)
-	pairs := make([]simPair, 0, len(sims))
-	for i, v := range sims {
-		m := s.Idx.MetaAt(i)
-		if exclude[m.ID] {
-			continue
-		}
-		pairs = append(pairs, simPair{i, v})
-	}
-	sort.Slice(pairs, func(a, b int) bool { return pairs[a].sim > pairs[b].sim })
-	if len(pairs) > limit {
-		pairs = pairs[:limit]
-	}
+	pairs := s.Idx.TopK(vec, limit, exclude)
 	out := make([]map[string]any, 0, len(pairs))
 	for _, p := range pairs {
-		m := s.Idx.MetaAt(p.row)
+		m := s.Idx.MetaAt(p.Row)
 		item := map[string]any{
 			"id": m.ID, "artist": m.Artist, "title": m.Title, "album": m.Album,
-			"duration": m.Duration, "cosine": float64(p.sim),
+			"duration": m.Duration, "cosine": float64(p.Score),
 			"stream":      "/api/stream/" + strconv.FormatInt(m.ID, 10),
 			"explanation": "похоже по звучанию",
 		}
@@ -56,46 +39,22 @@ func (s *Server) similarArtists(seedArtist string, limit int) []map[string]any {
 	if seedVec == nil {
 		return nil
 	}
-	type ag struct {
-		artist string
-		rows   []int
-	}
-	by := map[string]*ag{}
-	n := s.Idx.Size()
 	seedKey := strings.ToLower(strings.TrimSpace(seedArtist))
-	for i := 0; i < n; i++ {
-		m := s.Idx.MetaAt(i)
-		name := strings.TrimSpace(m.Artist)
-		if name == "" {
-			continue
-		}
-		key := strings.ToLower(name)
-		if key == seedKey {
-			continue
-		}
-		a := by[key]
-		if a == nil {
-			a = &ag{artist: name}
-			by[key] = a
-		}
-		a.rows = append(a.rows, i)
-	}
 	type scored struct {
 		artist string
 		rows   []int
 		sim    float32
 	}
 	var all []scored
-	for _, a := range by {
-		v := s.Idx.CentroidOf(a.rows)
-		if v == nil {
+	for _, group := range s.Idx.ArtistCentroids() {
+		if strings.ToLower(strings.TrimSpace(group.Artist)) == seedKey {
 			continue
 		}
 		var sim float32
-		for d := range v {
-			sim += v[d] * seedVec[d]
+		for d := range group.Vector {
+			sim += group.Vector[d] * seedVec[d]
 		}
-		all = append(all, scored{a.artist, a.rows, sim})
+		all = append(all, scored{group.Artist, group.Rows, sim})
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].sim > all[j].sim })
 	if len(all) > limit {
@@ -123,48 +82,25 @@ func (s *Server) similarAlbums(seedArtist, seedAlbum string, limit int) []map[st
 	if seedVec == nil {
 		return nil
 	}
-	type alb struct {
-		artist, album string
-		rows          []int
-	}
-	by := map[string]*alb{}
-	n := s.Idx.Size()
 	seedAl := strings.ToLower(strings.TrimSpace(seedAlbum))
 	seedAr := strings.ToLower(strings.TrimSpace(seedArtist))
-	for i := 0; i < n; i++ {
-		m := s.Idx.MetaAt(i)
-		album := strings.TrimSpace(m.Album)
-		if album == "" {
-			continue
-		}
-		artist := strings.TrimSpace(m.Artist)
-		if strings.ToLower(album) == seedAl && (seedAr == "" || strings.ToLower(artist) == seedAr) {
-			continue
-		}
-		key := strings.ToLower(artist) + "\x00" + strings.ToLower(album)
-		a := by[key]
-		if a == nil {
-			a = &alb{artist: artist, album: album}
-			by[key] = a
-		}
-		a.rows = append(a.rows, i)
-	}
 	type scored struct {
 		artist, album string
 		rows          []int
 		sim           float32
 	}
 	var all []scored
-	for _, a := range by {
-		v := s.Idx.CentroidOf(a.rows)
-		if v == nil {
+	for _, group := range s.Idx.AlbumCentroids() {
+		artistKey := strings.ToLower(strings.TrimSpace(group.Artist))
+		albumKey := strings.ToLower(strings.TrimSpace(group.Album))
+		if albumKey == seedAl && (seedAr == "" || artistKey == seedAr) {
 			continue
 		}
 		var sim float32
-		for d := range v {
-			sim += v[d] * seedVec[d]
+		for d := range group.Vector {
+			sim += group.Vector[d] * seedVec[d]
 		}
-		all = append(all, scored{a.artist, a.album, a.rows, sim})
+		all = append(all, scored{group.Artist, group.Album, group.Rows, sim})
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].sim > all[j].sim })
 	if len(all) > limit {
@@ -187,6 +123,8 @@ func (s *Server) similarAlbums(seedArtist, seedAlbum string, limit int) []map[st
 }
 
 func (s *Server) handleSimilarArtists(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() { s.latency.Observe("similar", time.Since(started)) }()
 	artist := strings.TrimSpace(r.URL.Query().Get("artist"))
 	if artist == "" {
 		http.Error(w, "artist required", 400)
@@ -199,6 +137,8 @@ func (s *Server) handleSimilarArtists(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSimilarAlbums(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() { s.latency.Observe("similar", time.Since(started)) }()
 	artist := strings.TrimSpace(r.URL.Query().Get("artist"))
 	album := strings.TrimSpace(r.URL.Query().Get("album"))
 	if album == "" {
@@ -212,6 +152,8 @@ func (s *Server) handleSimilarAlbums(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecommendSeed(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() { s.latency.Observe("recommend_seed", time.Since(started)) }()
 	q := r.URL.Query()
 	typ := strings.ToLower(strings.TrimSpace(q.Get("type")))
 	limit := 20
@@ -284,6 +226,8 @@ func (s *Server) handleRecommendSeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecommendFavorites(w http.ResponseWriter, _ *http.Request) {
+	started := time.Now()
+	defer func() { s.latency.Observe("recommend_favorites", time.Since(started)) }()
 	exclude := map[int64]bool{}
 	if recent, err := s.Store.RecentTrackIDs(24*7, 500); err == nil {
 		for _, id := range recent {

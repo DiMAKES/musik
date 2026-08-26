@@ -127,9 +127,6 @@ func (s *Server) handleMixPlay(w http.ResponseWriter, r *http.Request) {
 		req.StartTrackID = req.TrackID
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var ids []int64
 	var name string
 	mode := "playlist"
@@ -187,6 +184,8 @@ func (s *Server) handleMixPlay(w http.ResponseWriter, r *http.Request) {
 		startIdx = *req.StartIndex
 	}
 	sess := s.startFixedLocked(ids, mode, name, kind, startIdx, req.StartTrackID)
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
 	if generatedMix {
 		for _, id := range ids {
 			_ = s.Store.BumpRecStats(id, 1, 0, 0)

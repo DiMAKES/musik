@@ -18,7 +18,7 @@ Include:
 
 The repository must never contain:
 
-- `.env` or `deploy/secrets.env`;
+- `.env` or any private deployment configuration;
 - `MUSIK_PASSWORD`, `MUSIK_API_TOKEN` or `MUSIK_SESSION_SECRET` values;
 - SSH private keys, TLS private keys or production proxy configuration;
 - database, artwork, embeddings, music-library or wishlist exports;

@@ -142,13 +142,13 @@ func (s *Server) handleListenShare(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	s.mu.Lock()
 	sess := s.newSession("share")
+	sess.mu.Lock()
 	startID := s.pickStartTrackLocked(sess, nil)
 	sess.Current = startID
 	s.excludeTrackLocked(sess, startID)
 	s.refreshQueueFor(sess, startID, false)
-	s.mu.Unlock()
+	sess.mu.Unlock()
 
 	ctx := r.Context()
 	bitrate := s.Cfg.ShareBitrate
@@ -159,21 +159,21 @@ func (s *Server) handleListenShare(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.mu.Lock()
+		sess.mu.Lock()
 		id := sess.Current
 		path := ""
 		if row, ok := s.Idx.RowOf(id); ok {
 			path = s.Idx.MetaAt(row).Path
 		}
-		s.mu.Unlock()
+		sess.mu.Unlock()
 		if path == "" {
 			return
 		}
 		if _, err := os.Stat(path); err != nil {
 			log.Printf("share listen: missing file id=%d", id)
-			s.mu.Lock()
+			sess.mu.Lock()
 			s.advanceShareSessionLocked(sess)
-			s.mu.Unlock()
+			sess.mu.Unlock()
 			continue
 		}
 		if err := pipeTrackMP3(ctx, w, flusher, ffmpeg, path, bitrate); err != nil {
@@ -182,9 +182,9 @@ func (s *Server) handleListenShare(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("share listen ffmpeg: %v", err)
 		}
-		s.mu.Lock()
+		sess.mu.Lock()
 		s.advanceShareSessionLocked(sess)
-		s.mu.Unlock()
+		sess.mu.Unlock()
 	}
 }
 

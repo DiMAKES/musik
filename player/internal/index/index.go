@@ -1,10 +1,12 @@
 package index
 
 import (
+	"container/heap"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +43,24 @@ type Index struct {
 	// Clone lookups rebuilt on Load — excludeTrack uses these, not a full scan.
 	md5ToIDs     map[string][]int64
 	songKeyToIDs map[string][]int64
+	artistRows   map[string][]int
+	albumRows    map[string][]int
+	artistAlbums map[string][]int
+	artists      []GroupCentroid
+	albums       []GroupCentroid
 	cfg          config.Config
+}
+
+type ScoredRow struct {
+	Row   int
+	Score float32
+}
+
+type GroupCentroid struct {
+	Artist string
+	Album  string
+	Rows   []int
+	Vector []float32
 }
 
 func New(cfg config.Config) *Index {
@@ -50,6 +69,9 @@ func New(cfg config.Config) *Index {
 		idRow:        map[int64]int{},
 		md5ToIDs:     map[string][]int64{},
 		songKeyToIDs: map[string][]int64{},
+		artistRows:   map[string][]int{},
+		albumRows:    map[string][]int{},
+		artistAlbums: map[string][]int{},
 	}
 }
 
@@ -71,6 +93,10 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 		idx.idRow = map[int64]int{}
 		idx.md5ToIDs = map[string][]int64{}
 		idx.songKeyToIDs = map[string][]int64{}
+		idx.artistRows = map[string][]int{}
+		idx.albumRows = map[string][]int{}
+		idx.artistAlbums = map[string][]int{}
+		idx.artists, idx.albums = nil, nil
 		idx.mu.Unlock()
 		return nil
 	}
@@ -85,6 +111,11 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 	idRow := make(map[int64]int, n)
 	md5ToIDs := make(map[string][]int64)
 	songKeyToIDs := make(map[string][]int64)
+	artistRows := make(map[string][]int)
+	albumRows := make(map[string][]int)
+	artistAlbums := make(map[string][]int)
+	artistNames := make(map[string]string)
+	albumNames := make(map[string][2]string)
 
 	for i, r := range rows {
 		d := r.Dim
@@ -118,7 +149,30 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 		if key := SongKey(r.Artist, r.Title); key != "" {
 			songKeyToIDs[key] = append(songKeyToIDs[key], r.ID)
 		}
+		artistKey := normName(r.Artist)
+		albumKey := normName(r.Album)
+		if artistKey != "" {
+			artistRows[artistKey] = append(artistRows[artistKey], i)
+			if _, ok := artistNames[artistKey]; !ok {
+				artistNames[artistKey] = strings.TrimSpace(r.Artist)
+			}
+		}
+		if albumKey != "" {
+			albumRows[albumKey] = append(albumRows[albumKey], i)
+			key := artistKey + "\x00" + albumKey
+			artistAlbums[key] = append(artistAlbums[key], i)
+			if _, ok := albumNames[key]; !ok {
+				albumNames[key] = [2]string{strings.TrimSpace(r.Artist), strings.TrimSpace(r.Album)}
+			}
+		}
 	}
+	artists := buildGroupCentroids(mat, dim, artistRows, func(key string) (string, string) {
+		return artistNames[key], ""
+	})
+	albums := buildGroupCentroids(mat, dim, artistAlbums, func(key string) (string, string) {
+		names := albumNames[key]
+		return names[0], names[1]
+	})
 
 	idx.mu.Lock()
 	idx.IDs, idx.Meta, idx.Matrix = ids, meta, mat
@@ -126,6 +180,11 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 	idx.idRow = idRow
 	idx.md5ToIDs = md5ToIDs
 	idx.songKeyToIDs = songKeyToIDs
+	idx.artistRows = artistRows
+	idx.albumRows = albumRows
+	idx.artistAlbums = artistAlbums
+	idx.artists = artists
+	idx.albums = albums
 	idx.mu.Unlock()
 	return nil
 }
@@ -244,13 +303,7 @@ func (idx *Index) RowsForArtist(artist string) []int {
 	if want == "" {
 		return nil
 	}
-	var rows []int
-	for i, m := range idx.Meta {
-		if normName(m.Artist) == want {
-			rows = append(rows, i)
-		}
-	}
-	return rows
+	return append([]int(nil), idx.artistRows[want]...)
 }
 
 // RowsForAlbum returns index rows for artist+album (album alone if artist empty).
@@ -262,17 +315,10 @@ func (idx *Index) RowsForAlbum(artist, album string) []int {
 	if wantAl == "" {
 		return nil
 	}
-	var rows []int
-	for i, m := range idx.Meta {
-		if normName(m.Album) != wantAl {
-			continue
-		}
-		if wantA != "" && normName(m.Artist) != wantA {
-			continue
-		}
-		rows = append(rows, i)
+	if wantA == "" {
+		return append([]int(nil), idx.albumRows[wantAl]...)
 	}
-	return rows
+	return append([]int(nil), idx.artistAlbums[wantA+"\x00"+wantAl]...)
 }
 
 func normName(s string) string {
@@ -283,6 +329,130 @@ func normName(s string) string {
 	return strings.Map(func(r rune) rune {
 		return unicode.ToLower(r)
 	}, s)
+}
+
+func buildGroupCentroids(
+	matrix []float32,
+	dim int,
+	groups map[string][]int,
+	names func(string) (string, string),
+) []GroupCentroid {
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]GroupCentroid, 0, len(keys))
+	for _, key := range keys {
+		rows := groups[key]
+		vec := make([]float32, dim)
+		for _, row := range rows {
+			off := row * dim
+			for d := 0; d < dim; d++ {
+				vec[d] += matrix[off+d]
+			}
+		}
+		if len(rows) > 0 {
+			inv := float32(1) / float32(len(rows))
+			for d := range vec {
+				vec[d] *= inv
+			}
+		}
+		Normalize(vec)
+		artist, album := names(key)
+		out = append(out, GroupCentroid{
+			Artist: artist,
+			Album:  album,
+			Rows:   append([]int(nil), rows...),
+			Vector: vec,
+		})
+	}
+	return out
+}
+
+func (idx *Index) ArtistCentroids() []GroupCentroid {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return cloneGroups(idx.artists)
+}
+
+func (idx *Index) AlbumCentroids() []GroupCentroid {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return cloneGroups(idx.albums)
+}
+
+func cloneGroups(groups []GroupCentroid) []GroupCentroid {
+	out := make([]GroupCentroid, len(groups))
+	for i, group := range groups {
+		out[i] = GroupCentroid{
+			Artist: group.Artist,
+			Album:  group.Album,
+			Rows:   append([]int(nil), group.Rows...),
+			Vector: append([]float32(nil), group.Vector...),
+		}
+	}
+	return out
+}
+
+type scoreHeap []ScoredRow
+
+func (h scoreHeap) Len() int { return len(h) }
+func (h scoreHeap) Less(i, j int) bool {
+	if h[i].Score == h[j].Score {
+		return h[i].Row > h[j].Row
+	}
+	return h[i].Score < h[j].Score
+}
+func (h scoreHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *scoreHeap) Push(x any)   { *h = append(*h, x.(ScoredRow)) }
+func (h *scoreHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+// TopK returns exact cosine neighbors without materializing or sorting all N scores.
+func (idx *Index) TopK(vec []float32, limit int, exclude map[int64]bool) []ScoredRow {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if limit <= 0 || idx.N == 0 || len(vec) != idx.D {
+		return nil
+	}
+	if limit > idx.N {
+		limit = idx.N
+	}
+	h := make(scoreHeap, 0, limit)
+	for row := 0; row < idx.N; row++ {
+		if exclude != nil && exclude[idx.Meta[row].ID] {
+			continue
+		}
+		off := row * idx.D
+		var score float32
+		for d := 0; d < idx.D; d++ {
+			score += idx.Matrix[off+d] * vec[d]
+		}
+		item := ScoredRow{Row: row, Score: score}
+		if len(h) < limit {
+			heap.Push(&h, item)
+			continue
+		}
+		worst := h[0]
+		if score > worst.Score || (score == worst.Score && row < worst.Row) {
+			h[0] = item
+			heap.Fix(&h, 0)
+		}
+	}
+	out := append([]ScoredRow(nil), h...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].Row < out[j].Row
+		}
+		return out[i].Score > out[j].Score
+	})
+	return out
 }
 
 func (idx *Index) SimsTo(vec []float32) []float32 {
@@ -454,14 +624,7 @@ func Quantile(vals []float32, q float64) float32 {
 		return 0
 	}
 	cp := append([]float32(nil), vals...)
-	// simple insertion sort — N small enough for queue building pools
-	for i := 1; i < len(cp); i++ {
-		j := i
-		for j > 0 && cp[j-1] > cp[j] {
-			cp[j-1], cp[j] = cp[j], cp[j-1]
-			j--
-		}
-	}
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
 	pos := q * float64(len(cp)-1)
 	i := int(pos)
 	if i >= len(cp)-1 {

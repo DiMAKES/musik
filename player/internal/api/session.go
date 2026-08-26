@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/torwin-job/musik/player/internal/db"
@@ -16,6 +16,7 @@ import (
 // PlaySession holds per-tab / per-client playback state.
 // Taste profile is shared (one user); only current/queue/exclude are isolated.
 type PlaySession struct {
+	mu           sync.Mutex
 	ID           string
 	Mode         string // radio|session|daily|playlist|later|listen|share
 	Current      int64
@@ -42,8 +43,10 @@ func (s *Server) newSession(mode string) *PlaySession {
 		Rated:     map[int64]string{},
 		UpdatedAt: time.Now(),
 	}
+	s.sessionsMu.Lock()
 	s.sessions[id] = sess
 	s.gcSessionsLocked()
+	s.sessionsMu.Unlock()
 	s.persistSessionLocked(sess)
 	return sess
 }
@@ -52,9 +55,10 @@ func (s *Server) getSession(id string) *PlaySession {
 	if id == "" {
 		return nil
 	}
+	s.sessionsMu.RLock()
 	sess := s.sessions[id]
+	s.sessionsMu.RUnlock()
 	if sess != nil {
-		sess.UpdatedAt = time.Now()
 		return sess
 	}
 	// hydrate from SQLite after player restart
@@ -63,8 +67,13 @@ func (s *Server) getSession(id string) *PlaySession {
 		return nil
 	}
 	sess = hydrateSession(row)
+	s.sessionsMu.Lock()
+	if existing := s.sessions[id]; existing != nil {
+		s.sessionsMu.Unlock()
+		return existing
+	}
 	s.sessions[id] = sess
-	sess.UpdatedAt = time.Now()
+	s.sessionsMu.Unlock()
 	return sess
 }
 
@@ -107,20 +116,35 @@ func (s *Server) persistSessionLocked(sess *PlaySession) {
 	if sess == nil {
 		return
 	}
-	ex := make([]int64, 0, len(sess.Exclude))
+	id := sess.ID
+	mode := sess.Mode
+	current := sess.Current
+	dailyPos := sess.DailyPos
+	playlistName := sess.PlaylistName
+	playlistKind := sess.PlaylistKind
+	queueItems := append([]queue.Item(nil), sess.Queue...)
+	exclude := make([]int64, 0, len(sess.Exclude))
 	for id := range sess.Exclude {
-		ex = append(ex, id)
+		exclude = append(exclude, id)
 	}
-	qj, _ := json.Marshal(sess.Queue)
-	ej, _ := json.Marshal(ex)
-	rj, _ := json.Marshal(sess.Rated)
-	dj, _ := json.Marshal(sess.DailyIDs)
-	_ = s.Store.UpsertPlaySession(db.PlaySessionRow{
-		ID: sess.ID, Mode: sess.Mode, CurrentID: sess.Current,
-		QueueJSON: string(qj), ExcludeJSON: string(ej), RatedJSON: string(rj),
-		DailyIDsJSON: string(dj), DailyPos: sess.DailyPos,
-		PlaylistName: sess.PlaylistName, PlaylistKind: sess.PlaylistKind,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	rated := make(map[int64]string, len(sess.Rated))
+	for trackID, rating := range sess.Rated {
+		rated[trackID] = rating
+	}
+	dailyIDs := append([]int64(nil), sess.DailyIDs...)
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	s.enqueueBackgroundIO(func() {
+		qj, _ := json.Marshal(queueItems)
+		ej, _ := json.Marshal(exclude)
+		rj, _ := json.Marshal(rated)
+		dj, _ := json.Marshal(dailyIDs)
+		_ = s.Store.UpsertPlaySession(db.PlaySessionRow{
+			ID: id, Mode: mode, CurrentID: current,
+			QueueJSON: string(qj), ExcludeJSON: string(ej), RatedJSON: string(rj),
+			DailyIDsJSON: string(dj), DailyPos: dailyPos,
+			PlaylistName: playlistName, PlaylistKind: playlistKind,
+			UpdatedAt: updatedAt,
+		})
 	})
 }
 
@@ -143,7 +167,10 @@ func (s *Server) requireSession(w http.ResponseWriter, r *http.Request, bodySess
 func (s *Server) gcSessionsLocked() {
 	cutoffRAM := time.Now().Add(-6 * time.Hour)
 	for id, sess := range s.sessions {
-		if sess.UpdatedAt.Before(cutoffRAM) {
+		sess.mu.Lock()
+		stale := sess.UpdatedAt.Before(cutoffRAM)
+		sess.mu.Unlock()
+		if stale {
 			delete(s.sessions, id)
 		}
 	}
@@ -164,9 +191,12 @@ func (s *Server) gcSessionsLocked() {
 		var oldestTime time.Time
 		first := true
 		for id, sess := range s.sessions {
-			if first || sess.UpdatedAt.Before(oldestTime) {
+			sess.mu.Lock()
+			updatedAt := sess.UpdatedAt
+			sess.mu.Unlock()
+			if first || updatedAt.Before(oldestTime) {
 				oldestID = id
-				oldestTime = sess.UpdatedAt
+				oldestTime = updatedAt
 				first = false
 			}
 		}
@@ -229,42 +259,29 @@ func (s *Server) pickTasteStartLocked(sess *PlaySession) int64 {
 		recent[id] = true
 	}
 
-	sims := s.Idx.SimsTo(s.tasteForQueueLocked())
 	type pair struct {
 		row int
 		sim float32
 	}
-	all := make([]pair, 0, n)
-	for i, v := range sims {
-		all = append(all, pair{i, v})
-	}
-	sort.Slice(all, func(a, b int) bool { return all[a].sim > all[b].sim })
-
-	if s.Builder.Rng.Float64() < 0.12 && n > 8 {
-		lo := n / 2
-		hi := min(n, lo+max(8, n/5))
-		pool := all[lo:hi]
-		for tries := 0; tries < 12 && len(pool) > 0; tries++ {
-			p := pool[s.Builder.Rng.Intn(len(pool))]
-			id := s.Idx.MetaAt(p.row).ID
-			if !recent[id] {
-				return id
-			}
+	if s.Builder.RandomFloat64() < 0.12 && n > 8 {
+		if id := s.Builder.PickRandom(recent); id != 0 {
+			return id
 		}
 	}
 
 	k := 20
-	if k > len(all) {
-		k = len(all)
+	top := s.Idx.TopK(s.tasteForQueueLocked(), k, nil)
+	if len(top) == 0 {
+		return s.Builder.PickRandom(recent)
 	}
-	candidates := make([]pair, 0, k)
-	for _, p := range all[:k] {
-		id := s.Idx.MetaAt(p.row).ID
-		sim := p.sim
+	candidates := make([]pair, 0, len(top))
+	for _, p := range top {
+		id := s.Idx.MetaAt(p.Row).ID
+		sim := p.Score
 		if recent[id] {
 			sim -= 0.35
 		}
-		candidates = append(candidates, pair{p.row, sim})
+		candidates = append(candidates, pair{p.Row, sim})
 	}
 	allRecent := true
 	for _, p := range candidates {
@@ -275,8 +292,8 @@ func (s *Server) pickTasteStartLocked(sess *PlaySession) int64 {
 	}
 	if allRecent {
 		candidates = candidates[:0]
-		for _, p := range all[:k] {
-			candidates = append(candidates, p)
+		for _, p := range top {
+			candidates = append(candidates, pair{p.Row, p.Score})
 		}
 	}
 
@@ -292,7 +309,7 @@ func (s *Server) pickTasteStartLocked(sess *PlaySession) int64 {
 	if sum <= 0 {
 		return s.Idx.MetaAt(candidates[0].row).ID
 	}
-	r := s.Builder.Rng.Float64() * sum
+	r := s.Builder.RandomFloat64() * sum
 	for i, w := range weights {
 		r -= w
 		if r <= 0 {
@@ -342,6 +359,8 @@ func (s *Server) transitionsFromLocked(currentID int64) map[int64]float64 {
 }
 
 func (s *Server) refreshQueueFor(sess *PlaySession, currentID int64, countImpressions bool) {
+	started := time.Now()
+	defer func() { s.latency.Observe("queue_build", time.Since(started)) }()
 	opts := queue.BuildOpts{
 		ExploreRatio:    s.exploreLocked(),
 		Discover:        s.discoverModeLocked(),
@@ -355,10 +374,19 @@ func (s *Server) refreshQueueFor(sess *PlaySession, currentID int64, countImpres
 	if !countImpressions {
 		return
 	}
-	for _, q := range sess.Queue {
-		_ = s.Store.BumpRecStats(q.TrackID, 1, 0, 0)
+	impressions := make([]db.RecommendationImpression, 0, len(sess.Queue))
+	maturity := s.maturityLocked()
+	for position, q := range sess.Queue {
+		impressions = append(impressions, db.RecommendationImpression{
+			SessionID: sess.ID, TrackID: q.TrackID, Position: position,
+			Score: q.Score, CosineTaste: q.CosineTaste, CosineCurrent: q.CosineCur,
+			Explore: q.Explore, NewBoost: q.NewBoost, Maturity: maturity, Mode: sess.Mode,
+		})
 		s.Idx.BumpShownLocal(q.TrackID)
 	}
+	s.enqueueBackgroundIO(func() {
+		_ = s.Store.InsertRecommendationImpressions(impressions)
+	})
 }
 
 func (s *Server) rebuildDailyQueueFor(sess *PlaySession) {

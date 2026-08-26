@@ -84,6 +84,21 @@ CREATE TABLE IF NOT EXISTS rec_stats (
     updated_at     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS recommendation_impressions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    track_id        INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    position        INTEGER NOT NULL,
+    score           REAL NOT NULL DEFAULT 0,
+    cosine_taste    REAL NOT NULL DEFAULT 0,
+    cosine_current  REAL NOT NULL DEFAULT 0,
+    explore         INTEGER NOT NULL DEFAULT 0,
+    new_boost       INTEGER NOT NULL DEFAULT 0,
+    maturity        TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL DEFAULT '',
+    shown_at        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS transitions (
     from_id INTEGER NOT NULL REFERENCES tracks(id),
     to_id   INTEGER NOT NULL REFERENCES tracks(id),
@@ -218,6 +233,9 @@ CREATE INDEX IF NOT EXISTS idx_tracks_active ON tracks(is_active);
 CREATE INDEX IF NOT EXISTS idx_features_status ON features(status);
 CREATE INDEX IF NOT EXISTS idx_history_ts ON listening_history(ts);
 CREATE INDEX IF NOT EXISTS idx_history_weekday_action ON listening_history(weekday, action);
+CREATE INDEX IF NOT EXISTS idx_impressions_shown_at ON recommendation_impressions(shown_at);
+CREATE INDEX IF NOT EXISTS idx_impressions_session_track
+    ON recommendation_impressions(session_id, track_id, shown_at);
 CREATE INDEX IF NOT EXISTS idx_playlists_kind_id ON playlists(kind, id DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_discover_kind ON discover_tips(kind, created_at);
