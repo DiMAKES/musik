@@ -165,12 +165,18 @@ musik/
 | `cmd/musik-player/main.go` | точка входа |
 | `internal/config/` | env Go-плеера |
 | `internal/auth/` | пароль, cookie, Bearer, rate-limit логина |
-| `internal/db/` | SQLite RO/RW со стороны player |
+| `internal/db/` | SQLite: `store.go` схема, дальше файлы по таблицам |
 | `internal/index/` | матрица эмбеддингов в RAM, `SimsTo` (параллельно при N≥1500) |
 | `internal/taste/` | EMA-вкус |
 | `internal/queue/` | скоринг очереди: taste + transition + daypart + candidate pool |
-| `internal/api/` | HTTP handlers (radio, catalog, share, jobs proxy, …) |
+| `internal/library/` | правила библиотеки: безопасные пути загрузки, группировка artist/album |
+| `internal/playback/` | сессии, радио/плейлист, события прослушивания, вкус |
+| `internal/recommend/` | похожие треки / артисты / альбомы |
+| `internal/api/` | HTTP: маршруты, JSON, CORS; файлы по эндпоинтам |
+| `internal/apitest/` | HTTP-тесты плеера (через публичный Handler) |
 | `internal/static/` | Web UI: `index.html`, `app.js`, `style.css` |
+
+Тесты: HTTP — `internal/apitest`; домен — рядом с пакетом (`internal/library`, `internal/recommend`, `internal/playback`); SQLite — `internal/db`.
 
 Сборка: `make player` → `player/bin/musik-player`.
 
@@ -185,7 +191,7 @@ musik/
 
 ### `docs/` и `tests/`
 
-Документация — см. таблицу выше. Тесты: `tests/*.py` (pytest), `player/internal/.../*_test.go`.
+Документация — см. таблицу выше. Тесты: `tests/*.py` (pytest); Go — `player/internal/<пакет>/*_test.go` (`make test-go`).
 
 ---
 

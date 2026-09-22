@@ -1083,6 +1083,11 @@ function renderLib(q) {
     ul.innerHTML = "";
     const source =
       libTab === "favorites" ? library.filter((t) => favoriteIds.has(t.id)) : library;
+    if (libTab === "tracks" && !source.length && !qq) {
+      ul.innerHTML =
+        '<li class="sub" style="padding:.8rem 0">Пока пусто. Добавь музыку во вкладке «Загрузка».</li>';
+      return;
+    }
     if (libTab === "favorites" && !source.length) {
       ul.innerHTML = '<li class="sub" style="padding:.8rem 0">Избранное пусто — жми ♥ в плеере</li>';
       return;
@@ -1095,7 +1100,7 @@ function renderLib(q) {
         li.className = "track-row";
         const isFav = favoriteIds.has(t.id);
         li.innerHTML = `
-          <button type="button" class="linkish">${isFav ? "♥ " : ""}${escapeHtml(t.artist)} — ${escapeHtml(t.title)}</button>
+          <button type="button" class="linkish">${isFav ? "♥ " : ""}${t.ready === false ? "… " : ""}${escapeHtml(t.artist)} — ${escapeHtml(t.title)}</button>
           <span class="dur">${fmtTime(t.duration || 0)}</span>
           <span class="row-actions">
             <button type="button" class="tiny" data-act="track">Трек</button>
@@ -1365,6 +1370,304 @@ function wireAudio() {
   });
 }
 
+const AUDIO_EXTS = new Set([".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus"]);
+const UPLOAD_BATCH = 8;
+
+function audioExt(name) {
+  const i = String(name || "").lastIndexOf(".");
+  return i < 0 ? "" : String(name).slice(i).toLowerCase();
+}
+
+function fileRelPath(file) {
+  return String(file._relPath || file.webkitRelativePath || file.name || "").replaceAll("\\", "/");
+}
+
+function withRelPath(file, rel) {
+  try {
+    Object.defineProperty(file, "_relPath", { value: rel.replaceAll("\\", "/"), configurable: true });
+  } catch (_) {}
+  return file;
+}
+
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const tick = () => {
+      reader.readEntries((entries) => {
+        if (!entries.length) {
+          resolve(out);
+          return;
+        }
+        out.push(...entries);
+        tick();
+      }, reject);
+    };
+    tick();
+  });
+}
+
+async function filesFromEntry(entry, prefix = "") {
+  if (!entry) return [];
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+    return [withRelPath(file, prefix + file.name)];
+  }
+  if (!entry.isDirectory) return [];
+  const nextPrefix = prefix + entry.name + "/";
+  const children = await readAllEntries(entry.createReader());
+  const nested = await Promise.all(children.map((child) => filesFromEntry(child, nextPrefix)));
+  return nested.flat();
+}
+
+async function filesFromDataTransfer(dt) {
+  const items = [...(dt.items || [])];
+  if (items.some((item) => typeof item.webkitGetAsEntry === "function" && item.webkitGetAsEntry())) {
+    const groups = await Promise.all(
+      items
+        .filter((item) => item.kind === "file")
+        .map((item) => filesFromEntry(item.webkitGetAsEntry()))
+    );
+    return groups.flat();
+  }
+  return [...(dt.files || [])];
+}
+
+function setUploadBusy(busy) {
+  ["btn-upload-file", "btn-upload-files", "btn-upload-folder"].forEach((id) => {
+    const btn = $(id);
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.classList.toggle("loading", busy);
+  });
+  $("upload-drop")?.classList.toggle("is-busy", busy);
+}
+
+function setOpBar({ state = "idle", title, detail, pct } = {}) {
+  const bar = $("op-bar");
+  const fill = $("op-fill");
+  const titleEl = $("op-title");
+  const detailEl = $("op-detail");
+  const pctEl = $("op-pct");
+  const track = $("op-track");
+  if (!bar) return;
+  const value = Math.max(0, Math.min(100, Number(pct) || 0));
+  bar.dataset.state = state;
+  if (titleEl && title) titleEl.textContent = title;
+  if (detailEl && detail != null) detailEl.textContent = detail;
+  if (pctEl) pctEl.textContent = `${Math.round(value)}%`;
+  if (fill) fill.style.setProperty("--op-pct", `${value}%`);
+  if (track) track.setAttribute("aria-valuenow", String(Math.round(value)));
+}
+
+function jobProgress(job) {
+  const prog = job?.progress || job?.result?.progress || {};
+  const pct = Number(prog.pct);
+  const bits = [prog.phase, prog.message].filter(Boolean);
+  return {
+    pct: Number.isFinite(pct) ? pct : null,
+    detail: bits.join(" · ") || "",
+  };
+}
+
+async function waitForJob(id, { onProgress, tries = 180, intervalMs = 2000 } = {}) {
+  if (!id) return;
+  for (let i = 0; i < tries; i++) {
+    const j = await api(`/api/jobs/${id}`);
+    const prog = jobProgress(j);
+    if (onProgress) onProgress(j, prog);
+    if (j.status === "done") return j;
+    if (j.status === "failed") throw new Error(j.error || "Задание не удалось");
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("Сканирование ещё идёт. Открой эту вкладку позже.");
+}
+
+async function uploadMusicFiles(fileList) {
+  const all = [...fileList];
+  const files = all.filter((f) => AUDIO_EXTS.has(audioExt(f.name)));
+  const skippedExt = all.length - files.length;
+  if (!files.length) {
+    setOpBar({
+      state: "error",
+      title: "Нет аудиофайлов",
+      detail: skippedExt
+        ? `Пропущено ${skippedExt}: нужны MP3, FLAC, M4A, WAV, OGG или Opus.`
+        : "Файлы не выбраны.",
+      pct: 0,
+    });
+    return;
+  }
+  setUploadBusy(true);
+  setOpBar({
+    state: "run",
+    title: "Загрузка на диск",
+    detail: `0 из ${files.length}`,
+    pct: 0,
+  });
+  let saved = 0;
+  let skipped = skippedExt;
+  try {
+    for (let i = 0; i < files.length; i += UPLOAD_BATCH) {
+      const batch = files.slice(i, i + UPLOAD_BATCH);
+      const fd = new FormData();
+      batch.forEach((file) => {
+        fd.append("file", file);
+        fd.append("path", fileRelPath(file));
+      });
+      const res = await fetch("/api/library/upload", {
+        method: "POST",
+        credentials: "same-origin",
+        body: fd,
+      });
+      if (res.status === 401) {
+        showLogin("Нужен вход");
+        throw new Error("unauthorized");
+      }
+      if (!res.ok) {
+        let msg = res.statusText;
+        try {
+          const j = await res.json();
+          msg = j.error || msg;
+        } catch (_) {}
+        throw new Error(msg);
+      }
+      const out = await res.json();
+      saved += Number(out.count || 0);
+      skipped += Array.isArray(out.skipped) ? out.skipped.length : 0;
+      const done = Math.min(i + batch.length, files.length);
+      setOpBar({
+        state: "run",
+        title: "Загрузка на диск",
+        detail: `${done} из ${files.length} · сохранено ${saved}${skipped ? ` · пропущено ${skipped}` : ""}`,
+        pct: (done / files.length) * 55,
+      });
+    }
+    if (!saved) {
+      setOpBar({
+        state: "error",
+        title: "Ничего не сохранено",
+        detail: skipped ? `Пропущено ${skipped} файлов.` : "Сервер не принял файлы.",
+        pct: 0,
+      });
+      return;
+    }
+    setOpBar({
+      state: "run",
+      title: "Сканирование библиотеки",
+      detail: `На диске ${saved} файлов. Ищем треки и считаем эмбеддинги…`,
+      pct: 58,
+    });
+    const job = await api("/api/library/rescan", { method: "POST", body: "{}" });
+    const id = job.id || job.job_id;
+    const doneJob = await waitForJob(id, {
+      onProgress: (_j, prog) => {
+        const scanPct = prog.pct == null ? 58 : 58 + (prog.pct / 100) * 42;
+        setOpBar({
+          state: "run",
+          title: "Сканирование библиотеки",
+          detail: prog.detail || "Обработка новых треков…",
+          pct: scanPct,
+        });
+      },
+    });
+    await loadLibrary().catch(() => {});
+    const embed = doneJob?.result?.embed || {};
+    const failedEmb = Number(embed.failed || 0);
+    const computed = Number(embed.computed || 0) + Number(embed.from_cache || 0);
+    if (failedEmb > 0) {
+      setOpBar({
+        state: "error",
+        title: "Загружено, часть треков не обработана",
+        detail: `На диске ${saved}. Эмбеддинги: ок ${computed}, ошибка ${failedEmb}. Файлы уже в библиотеке, но радио их пока не возьмёт.`,
+        pct: 100,
+      });
+      return;
+    }
+    setOpBar({
+      state: "done",
+      title: "Готово",
+      detail: skipped
+        ? `Добавлено ${saved}, пропущено ${skipped}. Треки уже в библиотеке.`
+        : `Добавлено ${saved}. Треки уже в библиотеке.`,
+      pct: 100,
+    });
+  } catch (e) {
+    setOpBar({
+      state: "error",
+      title: "Операция прервалась",
+      detail: e.message || String(e),
+      pct: 0,
+    });
+  } finally {
+    setUploadBusy(false);
+    ["upload-file", "upload-files", "upload-folder"].forEach((id) => {
+      const el = $(id);
+      if (el) el.value = "";
+    });
+  }
+}
+
+function wireUploads() {
+  const bind = (btnId, inputId) => {
+    const btn = $(btnId);
+    const input = $(inputId);
+    if (!btn || !input) return;
+    btn.onclick = () => input.click();
+    input.onchange = () => {
+      if (input.files?.length) uploadMusicFiles(input.files).catch((e) => {
+        setOpBar({ state: "error", title: "Ошибка", detail: e.message || String(e), pct: 0 });
+      });
+    };
+  };
+  bind("btn-upload-file", "upload-file");
+  bind("btn-upload-files", "upload-files");
+  bind("btn-upload-folder", "upload-folder");
+
+  const zone = $("upload-drop");
+  const view = $("view-upload");
+  if (!zone || !view) return;
+  zone.onclick = () => $("upload-files")?.click();
+  zone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      $("upload-files")?.click();
+    }
+  });
+
+  let dragDepth = 0;
+  const highlight = (on) => zone.classList.toggle("is-drag", on);
+  const onDragOver = (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDragEnter = (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    dragDepth++;
+    highlight(true);
+  };
+  const onDragLeave = () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) highlight(false);
+  };
+  const onDrop = (e) => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    dragDepth = 0;
+    highlight(false);
+    filesFromDataTransfer(e.dataTransfer)
+      .then((files) => uploadMusicFiles(files))
+      .catch((err) => setOpBar({ state: "error", title: "Ошибка", detail: err.message || String(err), pct: 0 }));
+  };
+  [view].forEach((el) => {
+    el.addEventListener("dragenter", onDragEnter);
+    el.addEventListener("dragover", onDragOver);
+    el.addEventListener("dragleave", onDragLeave);
+    el.addEventListener("drop", onDrop);
+  });
+}
+
 async function refreshMixes() {
   const btn = $("btn-refresh-mixes");
   const label = $("refresh-label");
@@ -1454,6 +1757,7 @@ function wire() {
   $("btn-share-radio").onclick = () => createShareLink().catch((e) => toast(e.message || String(e)));
   $("btn-share-radio-profile").onclick = () => createShareLink().catch((e) => toast(e.message || String(e)));
   $("btn-refresh-mixes").onclick = () => refreshMixes();
+  wireUploads();
   $("btn-play").onclick = togglePlay;
   $("mini-play").onclick = (e) => {
     e.stopPropagation();

@@ -19,7 +19,10 @@ func openTestStore(t *testing.T) (*Store, string) {
 	schema := []string{
 		`CREATE TABLE tracks (
 			id INTEGER PRIMARY KEY, path TEXT NOT NULL DEFAULT '',
-			title TEXT, artist TEXT, album TEXT, duration REAL
+			title TEXT, artist TEXT, album TEXT, duration REAL,
+			is_active INTEGER NOT NULL DEFAULT 1,
+			is_duplicate_of INTEGER,
+			artwork_path TEXT
 		)`,
 		`CREATE TABLE listening_history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL,

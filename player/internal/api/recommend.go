@@ -1,125 +1,71 @@
 package api
 
 import (
-	"math/rand"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/torwin-job/musik/player/internal/index"
+	"github.com/torwin-job/musik/player/internal/recommend"
 )
 
-func (s *Server) topTrackSims(vec []float32, exclude map[int64]bool, limit int) []map[string]any {
-	if len(vec) == 0 || limit <= 0 {
-		return nil
+func trackHitJSON(h recommend.TrackHit) map[string]any {
+	item := map[string]any{
+		"id": h.ID, "artist": h.Artist, "title": h.Title, "album": h.Album,
+		"duration": h.Duration, "cosine": h.Cosine,
+		"stream":      "/api/stream/" + strconv.FormatInt(h.ID, 10),
+		"explanation": "похоже по звучанию",
 	}
-	pairs := s.Idx.TopK(vec, limit, exclude)
-	out := make([]map[string]any, 0, len(pairs))
-	for _, p := range pairs {
-		m := s.Idx.MetaAt(p.Row)
-		item := map[string]any{
-			"id": m.ID, "artist": m.Artist, "title": m.Title, "album": m.Album,
-			"duration": m.Duration, "cosine": float64(p.Score),
-			"stream":      "/api/stream/" + strconv.FormatInt(m.ID, 10),
-			"explanation": "похоже по звучанию",
-		}
-		if m.ArtworkPath != "" {
-			item["artwork"] = "/api/artwork/" + strconv.FormatInt(m.ID, 10)
-		}
-		out = append(out, item)
+	if h.HasArtwork {
+		item["artwork"] = "/api/artwork/" + strconv.FormatInt(h.ID, 10)
 	}
-	return out
+	return item
 }
 
-func (s *Server) similarArtists(seedArtist string, limit int) []map[string]any {
-	seedRows := s.Idx.RowsForArtist(seedArtist)
-	seedVec := s.Idx.CentroidOf(seedRows)
-	if seedVec == nil {
-		return nil
+func artistHitJSON(h recommend.ArtistHit) map[string]any {
+	item := map[string]any{
+		"type": "artist", "artist": h.Artist, "tracks": h.Tracks,
+		"cosine": h.Cosine, "cover_track_id": h.CoverTrackID,
+		"explanation": h.Explanation,
 	}
-	seedKey := strings.ToLower(strings.TrimSpace(seedArtist))
-	type scored struct {
-		artist string
-		rows   []int
-		sim    float32
+	if h.HasArtwork {
+		item["artwork"] = "/api/artwork/" + strconv.FormatInt(h.CoverTrackID, 10)
 	}
-	var all []scored
-	for _, group := range s.Idx.ArtistCentroids() {
-		if strings.ToLower(strings.TrimSpace(group.Artist)) == seedKey {
-			continue
-		}
-		var sim float32
-		for d := range group.Vector {
-			sim += group.Vector[d] * seedVec[d]
-		}
-		all = append(all, scored{group.Artist, group.Rows, sim})
-	}
-	sort.Slice(all, func(i, j int) bool { return all[i].sim > all[j].sim })
-	if len(all) > limit {
-		all = all[:limit]
-	}
-	out := make([]map[string]any, 0, len(all))
-	for _, a := range all {
-		m := s.Idx.MetaAt(a.rows[0])
-		item := map[string]any{
-			"type": "artist", "artist": a.artist, "tracks": len(a.rows),
-			"cosine": float64(a.sim), "cover_track_id": m.ID,
-			"explanation": "похоже на «" + seedArtist + "»",
-		}
-		if m.ArtworkPath != "" {
-			item["artwork"] = "/api/artwork/" + strconv.FormatInt(m.ID, 10)
-		}
-		out = append(out, item)
-	}
-	return out
+	return item
 }
 
-func (s *Server) similarAlbums(seedArtist, seedAlbum string, limit int) []map[string]any {
-	seedRows := s.Idx.RowsForAlbum(seedArtist, seedAlbum)
-	seedVec := s.Idx.CentroidOf(seedRows)
-	if seedVec == nil {
-		return nil
+func albumHitJSON(h recommend.AlbumHit) map[string]any {
+	item := map[string]any{
+		"type": "album", "artist": h.Artist, "album": h.Album, "tracks": h.Tracks,
+		"cosine": h.Cosine, "cover_track_id": h.CoverTrackID,
+		"explanation": h.Explanation,
 	}
-	seedAl := strings.ToLower(strings.TrimSpace(seedAlbum))
-	seedAr := strings.ToLower(strings.TrimSpace(seedArtist))
-	type scored struct {
-		artist, album string
-		rows          []int
-		sim           float32
+	if h.HasArtwork {
+		item["artwork"] = "/api/artwork/" + strconv.FormatInt(h.CoverTrackID, 10)
 	}
-	var all []scored
-	for _, group := range s.Idx.AlbumCentroids() {
-		artistKey := strings.ToLower(strings.TrimSpace(group.Artist))
-		albumKey := strings.ToLower(strings.TrimSpace(group.Album))
-		if albumKey == seedAl && (seedAr == "" || artistKey == seedAr) {
-			continue
-		}
-		var sim float32
-		for d := range group.Vector {
-			sim += group.Vector[d] * seedVec[d]
-		}
-		all = append(all, scored{group.Artist, group.Album, group.Rows, sim})
+	return item
+}
+
+func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() { s.latency.Observe("similar", time.Since(started)) }()
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "bad_id", "bad id")
+		return
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].sim > all[j].sim })
-	if len(all) > limit {
-		all = all[:limit]
+	if _, ok := s.Idx.RowOf(id); !ok {
+		writeErr(w, 404, "not_found", "not in index")
+		return
 	}
-	out := make([]map[string]any, 0, len(all))
-	for _, a := range all {
-		m := s.Idx.MetaAt(a.rows[0])
-		item := map[string]any{
-			"type": "album", "artist": a.artist, "album": a.album, "tracks": len(a.rows),
-			"cosine": float64(a.sim), "cover_track_id": m.ID,
-			"explanation": "похоже на «" + seedAlbum + "»",
-		}
-		if m.ArtworkPath != "" {
-			item["artwork"] = "/api/artwork/" + strconv.FormatInt(m.ID, 10)
-		}
-		out = append(out, item)
+	hits := recommend.SimilarTracks(s.Idx, id, 10)
+	out := make([]map[string]any, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, map[string]any{
+			"id": h.ID, "artist": h.Artist, "title": h.Title, "cosine": h.Cosine,
+		})
 	}
-	return out
+	writeJSON(w, out)
 }
 
 func (s *Server) handleSimilarArtists(w http.ResponseWriter, r *http.Request) {
@@ -127,13 +73,15 @@ func (s *Server) handleSimilarArtists(w http.ResponseWriter, r *http.Request) {
 	defer func() { s.latency.Observe("similar", time.Since(started)) }()
 	artist := strings.TrimSpace(r.URL.Query().Get("artist"))
 	if artist == "" {
-		http.Error(w, "artist required", 400)
+		writeErr(w, 400, "artist_required", "artist required")
 		return
 	}
-	writeJSON(w, map[string]any{
-		"seed":    artist,
-		"artists": s.similarArtists(artist, 12),
-	})
+	hits := recommend.SimilarArtists(s.Idx, artist, 12)
+	out := make([]map[string]any, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, artistHitJSON(h))
+	}
+	writeJSON(w, map[string]any{"seed": artist, "artists": out})
 }
 
 func (s *Server) handleSimilarAlbums(w http.ResponseWriter, r *http.Request) {
@@ -142,12 +90,17 @@ func (s *Server) handleSimilarAlbums(w http.ResponseWriter, r *http.Request) {
 	artist := strings.TrimSpace(r.URL.Query().Get("artist"))
 	album := strings.TrimSpace(r.URL.Query().Get("album"))
 	if album == "" {
-		http.Error(w, "album required", 400)
+		writeErr(w, 400, "album_required", "album required")
 		return
+	}
+	hits := recommend.SimilarAlbums(s.Idx, artist, album, 12)
+	out := make([]map[string]any, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, albumHitJSON(h))
 	}
 	writeJSON(w, map[string]any{
 		"seed":   map[string]string{"artist": artist, "album": album},
-		"albums": s.similarAlbums(artist, album, 12),
+		"albums": out,
 	})
 }
 
@@ -162,9 +115,8 @@ func (s *Server) handleRecommendSeed(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	exclude := map[int64]bool{}
-	var vec []float32
 	seed := map[string]any{"type": typ}
+	var hits []recommend.TrackHit
 
 	switch typ {
 	case "track", "song", "":
@@ -176,27 +128,25 @@ func (s *Server) handleRecommendSeed(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "track_id", "track_id required")
 			return
 		}
-		row, ok := s.Idx.RowOf(id)
-		if !ok {
+		if _, ok := s.Idx.RowOf(id); !ok {
 			writeErr(w, 404, "not_found", "track not in index")
 			return
 		}
-		exclude[id] = true
-		vec = s.Idx.Vector(row)
 		seed["track_id"] = id
 		seed["track"] = s.trackJSON(id)
+		hits = recommend.FromTrack(s.Idx, id, limit)
 	case "artist":
 		artist := strings.TrimSpace(q.Get("artist"))
 		if artist == "" {
 			writeErr(w, 400, "artist", "artist required")
 			return
 		}
-		rows := s.Idx.RowsForArtist(artist)
-		for _, ri := range rows {
-			exclude[s.Idx.MetaAt(ri).ID] = true
+		if s.Idx.CentroidOf(s.Idx.RowsForArtist(artist)) == nil {
+			writeErr(w, 404, "empty", "no embeddings for seed")
+			return
 		}
-		vec = s.Idx.CentroidOf(rows)
 		seed["artist"] = artist
+		hits = recommend.FromArtist(s.Idx, artist, limit)
 	case "album":
 		artist := strings.TrimSpace(q.Get("artist"))
 		album := strings.TrimSpace(q.Get("album"))
@@ -204,143 +154,54 @@ func (s *Server) handleRecommendSeed(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "album", "album required")
 			return
 		}
-		rows := s.Idx.RowsForAlbum(artist, album)
-		for _, ri := range rows {
-			exclude[s.Idx.MetaAt(ri).ID] = true
+		if s.Idx.CentroidOf(s.Idx.RowsForAlbum(artist, album)) == nil {
+			writeErr(w, 404, "empty", "no embeddings for seed")
+			return
 		}
-		vec = s.Idx.CentroidOf(rows)
 		seed["artist"] = artist
 		seed["album"] = album
+		hits = recommend.FromAlbum(s.Idx, artist, album, limit)
 	default:
 		writeErr(w, 400, "type", "type must be track|artist|album")
 		return
 	}
-	if vec == nil {
-		writeErr(w, 404, "empty", "no embeddings for seed")
-		return
+	tracks := make([]map[string]any, 0, len(hits))
+	for _, h := range hits {
+		tracks = append(tracks, trackHitJSON(h))
 	}
-	writeJSON(w, map[string]any{
-		"ok": true, "seed": seed,
-		"tracks": s.topTrackSims(vec, exclude, limit),
-	})
+	writeJSON(w, map[string]any{"ok": true, "seed": seed, "tracks": tracks})
 }
 
 func (s *Server) handleRecommendFavorites(w http.ResponseWriter, _ *http.Request) {
 	started := time.Now()
 	defer func() { s.latency.Observe("recommend_favorites", time.Since(started)) }()
-	exclude := map[int64]bool{}
-	if recent, err := s.Store.RecentTrackIDs(24*7, 500); err == nil {
-		for _, id := range recent {
-			exclude[id] = true
-		}
-	}
-	var vecs [][]float32
-	basedOn := map[string]any{}
-
-	favTracks, _ := s.Store.FavoritesList()
-	trackTitles := make([]string, 0, len(favTracks))
-	for _, t := range favTracks {
-		exclude[t.TrackID] = true
-		if row, ok := s.Idx.RowOf(t.TrackID); ok {
-			vecs = append(vecs, s.Idx.Vector(row))
-			trackTitles = append(trackTitles, t.Title)
-		}
-	}
-	basedOn["tracks"] = trackTitles
-
-	favArtists, _ := s.Store.FavArtistsList()
-	artistNames := make([]string, 0, len(favArtists))
-	for _, a := range favArtists {
-		artistNames = append(artistNames, a.Artist)
-		rows := s.Idx.RowsForArtist(a.Artist)
-		for _, r := range rows {
-			exclude[s.Idx.MetaAt(r).ID] = true
-		}
-		if v := s.Idx.CentroidOf(rows); v != nil {
-			vecs = append(vecs, v)
-		}
-	}
-	basedOn["artists"] = artistNames
-
-	favAlbums, _ := s.Store.FavAlbumsList()
-	albumNames := make([]string, 0, len(favAlbums))
-	for _, a := range favAlbums {
-		albumNames = append(albumNames, a.Artist+" — "+a.Album)
-		rows := s.Idx.RowsForAlbum(a.Artist, a.Album)
-		for _, r := range rows {
-			exclude[s.Idx.MetaAt(r).ID] = true
-		}
-		if v := s.Idx.CentroidOf(rows); v != nil {
-			vecs = append(vecs, v)
-		}
-	}
-	basedOn["albums"] = albumNames
-
-	if len(vecs) == 0 {
+	mix := recommend.FromFavorites(s.Store, s.Idx)
+	if mix.Empty {
 		writeJSON(w, map[string]any{
 			"ok": false, "empty": true,
 			"hint":     "Добавь любимые песни, артистов или альбомы (♥)",
 			"tracks":   []any{},
 			"artists":  []any{},
 			"albums":   []any{},
-			"based_on": basedOn,
+			"based_on": mix.BasedOn,
 		})
 		return
 	}
-
-	dim := len(vecs[0])
-	sum := make([]float64, dim)
-	used := 0
-	for _, v := range vecs {
-		if len(v) != dim {
-			continue
-		}
-		for d := 0; d < dim; d++ {
-			sum[d] += float64(v[d])
-		}
-		used++
+	tracks := make([]map[string]any, 0, len(mix.Tracks))
+	for _, h := range mix.Tracks {
+		tracks = append(tracks, trackHitJSON(h))
 	}
-	q := make([]float32, dim)
-	inv := 1.0 / float64(used)
-	for d := 0; d < dim; d++ {
-		q[d] = float32(sum[d] * inv)
+	artists := make([]map[string]any, 0, len(mix.Artists))
+	for _, h := range mix.Artists {
+		artists = append(artists, artistHitJSON(h))
 	}
-	index.Normalize(q)
-
-	tracks := s.topTrackSims(q, exclude, 48)
-	daySeed, _ := strconv.ParseInt(time.Now().Format("20060102"), 10, 64)
-	rng := rand.New(rand.NewSource(daySeed))
-	rng.Shuffle(len(tracks), func(i, j int) { tracks[i], tracks[j] = tracks[j], tracks[i] })
-	if len(tracks) > 24 {
-		tracks = tracks[:24]
+	albums := make([]map[string]any, 0, len(mix.Albums))
+	for _, h := range mix.Albums {
+		albums = append(albums, albumHitJSON(h))
 	}
-
-	var simArtists []map[string]any
-	var simAlbums []map[string]any
-	day := time.Now().YearDay()
-	if len(favArtists) > 0 {
-		seed := favArtists[day%len(favArtists)]
-		simArtists = s.similarArtists(seed.Artist, 10)
-	} else if len(favTracks) > 0 {
-		seed := favTracks[day%len(favTracks)]
-		simArtists = s.similarArtists(seed.Artist, 10)
-	}
-	if len(favAlbums) > 0 {
-		seed := favAlbums[day%len(favAlbums)]
-		simAlbums = s.similarAlbums(seed.Artist, seed.Album, 10)
-	} else if len(favTracks) > 0 {
-		seed := favTracks[day%len(favTracks)]
-		if row, ok := s.Idx.RowOf(seed.TrackID); ok {
-			m := s.Idx.MetaAt(row)
-			if m.Album != "" {
-				simAlbums = s.similarAlbums(m.Artist, m.Album, 10)
-			}
-		}
-	}
-
 	writeJSON(w, map[string]any{
-		"ok": true, "based_on": basedOn,
-		"tracks": tracks, "artists": simArtists, "albums": simAlbums,
+		"ok": true, "based_on": mix.BasedOn,
+		"tracks": tracks, "artists": artists, "albums": albums,
 		"explanation": "на основе твоих любимых — по звучанию (CLAP)",
 	})
 }

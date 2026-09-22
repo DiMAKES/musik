@@ -1,6 +1,8 @@
-.PHONY: up down logs rescan mixes smoke player test test-python test-go test-flutter build
+.PHONY: up down logs rescan mixes smoke player test test-python test-go test-flutter build \
+	dev-init dev-up dev-down dev-logs dev-player dev-worker dev-ps
 
 COMPOSE ?= docker compose
+DEV_COMPOSE ?= $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 BASE ?= http://127.0.0.1:8787
 
 # Load .env if present (for TOKEN/PASSWORD in make targets)
@@ -17,6 +19,27 @@ down:
 
 logs:
 	$(COMPOSE) logs -f --tail=200
+
+dev-init:
+	$(DEV_COMPOSE) up -d --build
+
+dev-up:
+	$(DEV_COMPOSE) up -d --no-build
+
+dev-down:
+	$(DEV_COMPOSE) stop
+
+dev-logs:
+	$(DEV_COMPOSE) logs -f --tail=200
+
+dev-player:
+	$(DEV_COMPOSE) restart player
+
+dev-worker:
+	$(DEV_COMPOSE) restart worker
+
+dev-ps:
+	$(DEV_COMPOSE) ps
 
 player:
 	go -C player build -o bin/musik-player ./cmd/musik-player

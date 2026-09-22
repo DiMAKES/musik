@@ -3,8 +3,8 @@
 Base URL: `http://127.0.0.1:8787`  
 OpenAPI: [`GET /api/openapi.json`](/api/openapi.json) · source [`openapi.yaml`](openapi.yaml)
 
-Content-Type: `application/json` (кроме stream/artwork).  
-Ошибки: `{"error":"…","code":"…"}`.
+Content-Type: `application/json` (кроме stream/artwork и `POST /api/library/upload`).
+Все JSON-ошибки используют envelope `{"error":"…","code":"…"}`.
 
 ## Auth (один владелец)
 
@@ -37,13 +37,11 @@ Content-Type: `application/json` (кроме stream/artwork).
 | GET | `/api/artists` | `{artists, count}` |
 | GET | `/api/albums` | `{albums, count}` |
 | GET | `/api/tracks/{id}` | один трек |
-| GET | `/api/stream/{id}` | аудио (Range) |
+| GET | `/api/stream/{id}` | оригинал (Range); `?q=mobile|aac|mp3`, alias `?fmt=…` — мобильный transcode |
 | GET | `/api/artwork/{id}` | обложка |
 | GET | `/api/similar/{id}` | top-10 cosine |
 | POST | `/api/reload` | перечитать индекс из SQLite |
 | GET | `/api/now` | current + queue (`?session_id=`) |
-| GET | `/api/queue` | очередь |
-| POST | `/api/queue/refresh` | пересобрать очередь |
 | POST | `/api/events` | playback events |
 | POST | `/api/session/start` | `{seed_track_id?}` |
 | POST | `/api/session/jump` | прыжок по индексу в fixed playlist |
@@ -59,10 +57,7 @@ Content-Type: `application/json` (кроме stream/artwork).
 | Method | Path | Описание |
 |--------|------|----------|
 | GET | `/api/mixes` | полки |
-| POST | `/api/mixes/{kind}/play` | играть микс |
-| GET | `/api/playlists/daily/today` | daily |
-| POST | `/api/playlists/daily/play` | играть daily |
-| GET | `/api/playlists/{kind}/latest` | latest playlist |
+| POST | `/api/mixes/{kind}/play` | играть микс (в т.ч. daily) |
 | GET | `/api/later` | отложенные |
 | POST | `/api/later` | `{track_id}` |
 | DELETE | `/api/later` | `{track_id}` |
@@ -87,8 +82,9 @@ Content-Type: `application/json` (кроме stream/artwork).
 |--------|------|----------|
 | GET | `/api/jobs` | `?status=` список |
 | GET | `/api/jobs/{id}` | статус |
-| POST | `/api/jobs/{kind}` | scan\|embed\|clusters\|daily\|album_tips\|full_rescan\|mix_pack |
-| POST | `/api/library/rescan` | enqueue full_rescan |
+| POST | `/api/jobs/{kind}` | scan\|embed\|clusters\|daily\|album_tips\|full_rescan\|mix_pack; ответ содержит одинаковые aliases `id` и `job_id` |
+| POST | `/api/library/upload` | multipart: `file` + `path` (относительный путь внутри библиотеки) |
+| POST | `/api/library/rescan` | enqueue full_rescan; ответ содержит одинаковые aliases `id` и `job_id` |
 | GET | `/api/discover/albums` | new album tips |
 | GET | `/api/discover/resurfaced` | старый каталог |
 | GET | `/api/metrics/weekly` | skip-rate, listens, diversity |

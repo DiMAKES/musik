@@ -14,7 +14,7 @@ services:
       MUSIK_PLAYER_ADDR: ":8787"
     volumes:
       - musik-data:/data
-      - ${MUSIK_LIBRARY:-./data/music}:/music:ro
+      - ${MUSIK_LIBRARY:-./data/music}:/music
     depends_on:
       - worker
     restart: unless-stopped

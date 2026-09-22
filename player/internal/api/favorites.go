@@ -86,17 +86,17 @@ func (s *Server) handleFavoritesStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFavoritesList(w http.ResponseWriter, r *http.Request) {
 	tracks, err := s.Store.FavoritesList()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeErr(w, 500, "db", err.Error())
 		return
 	}
 	artists, err := s.Store.FavArtistsList()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeErr(w, 500, "db", err.Error())
 		return
 	}
 	albums, err := s.Store.FavAlbumsList()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeErr(w, 500, "db", err.Error())
 		return
 	}
 
@@ -147,12 +147,12 @@ func (s *Server) handleFavoritesList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFavoritesAdd(w http.ResponseWriter, r *http.Request) {
 	var req favReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", 400)
+		writeErr(w, 400, "bad_json", "bad json")
 		return
 	}
 	out, code, errMsg := s.favMutate(req, true)
 	if code != 0 {
-		http.Error(w, errMsg, code)
+		writeErr(w, code, "favorite", errMsg)
 		return
 	}
 	writeJSON(w, out)
@@ -161,12 +161,12 @@ func (s *Server) handleFavoritesAdd(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFavoritesRemove(w http.ResponseWriter, r *http.Request) {
 	var req favReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", 400)
+		writeErr(w, 400, "bad_json", "bad json")
 		return
 	}
 	out, code, errMsg := s.favMutate(req, false)
 	if code != 0 {
-		http.Error(w, errMsg, code)
+		writeErr(w, code, "favorite", errMsg)
 		return
 	}
 	writeJSON(w, out)
@@ -175,7 +175,7 @@ func (s *Server) handleFavoritesRemove(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 	var req favReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", 400)
+		writeErr(w, 400, "bad_json", "bad json")
 		return
 	}
 	typ := strings.ToLower(strings.TrimSpace(req.Type))
@@ -186,7 +186,7 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 	switch typ {
 	case "track", "song":
 		if req.TrackID == 0 {
-			http.Error(w, "track_id required", 400)
+			writeErr(w, 400, "track_id_required", "track_id required")
 			return
 		}
 		if s.Store.FavoritesHas(req.TrackID) {
@@ -194,14 +194,14 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 			favorited = false
 		} else {
 			if err := s.Store.FavoritesAdd(req.TrackID); err != nil {
-				http.Error(w, err.Error(), 500)
+				writeErr(w, 500, "db", err.Error())
 				return
 			}
 			favorited = true
 		}
 		writeJSON(w, map[string]any{
 			"ok": true, "type": "track", "favorited": favorited, "track_id": req.TrackID,
-			"count": s.Store.FavoritesCount(),
+			"count":  s.Store.FavoritesCount(),
 			"counts": s.favCounts(),
 		})
 	case "artist":
@@ -212,7 +212,7 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if artist == "" {
-			http.Error(w, "artist required", 400)
+			writeErr(w, 400, "artist_required", "artist required")
 			return
 		}
 		if s.Store.FavArtistHas(artist) {
@@ -220,7 +220,7 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 			favorited = false
 		} else {
 			if err := s.Store.FavArtistAdd(artist); err != nil {
-				http.Error(w, err.Error(), 500)
+				writeErr(w, 500, "db", err.Error())
 				return
 			}
 			favorited = true
@@ -243,7 +243,7 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if album == "" {
-			http.Error(w, "album required", 400)
+			writeErr(w, 400, "album_required", "album required")
 			return
 		}
 		if s.Store.FavAlbumHas(artist, album) {
@@ -251,7 +251,7 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 			favorited = false
 		} else {
 			if err := s.Store.FavAlbumAdd(artist, album); err != nil {
-				http.Error(w, err.Error(), 500)
+				writeErr(w, 500, "db", err.Error())
 				return
 			}
 			favorited = true
@@ -261,7 +261,7 @@ func (s *Server) handleFavoritesToggle(w http.ResponseWriter, r *http.Request) {
 			"counts": s.favCounts(),
 		})
 	default:
-		http.Error(w, "type must be track|artist|album", 400)
+		writeErr(w, 400, "invalid_type", "type must be track|artist|album")
 	}
 }
 

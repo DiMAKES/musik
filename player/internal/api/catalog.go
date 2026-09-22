@@ -2,52 +2,38 @@ package api
 
 import (
 	"net/http"
-	"sort"
 	"strconv"
-	"strings"
+
+	"github.com/torwin-job/musik/player/internal/library"
 )
 
+func artworkURL(id int64, has bool) string {
+	if !has {
+		return ""
+	}
+	return "/api/artwork/" + strconv.FormatInt(id, 10)
+}
+
 func (s *Server) handleArtists(w http.ResponseWriter, _ *http.Request) {
+	groups := library.GroupArtists(s.Idx)
 	type row struct {
-		Artist        string `json:"artist"`
-		Tracks        int    `json:"tracks"`
-		CoverTrackID  int64  `json:"cover_track_id,omitempty"`
-		Artwork       string `json:"artwork,omitempty"`
+		Artist       string `json:"artist"`
+		Tracks       int    `json:"tracks"`
+		CoverTrackID int64  `json:"cover_track_id,omitempty"`
+		Artwork      string `json:"artwork,omitempty"`
 	}
-	by := map[string]*row{}
-	n := s.Idx.Size()
-	for i := 0; i < n; i++ {
-		m := s.Idx.MetaAt(i)
-		name := strings.TrimSpace(m.Artist)
-		if name == "" {
-			name = "Unknown"
-		}
-		key := strings.ToLower(name)
-		r := by[key]
-		if r == nil {
-			r = &row{Artist: name}
-			by[key] = r
-			r.CoverTrackID = m.ID
-			if m.ArtworkPath != "" {
-				r.Artwork = "/api/artwork/" + strconv.FormatInt(m.ID, 10)
-			}
-		}
-		r.Tracks++
+	out := make([]row, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, row{
+			Artist: g.Artist, Tracks: g.Tracks, CoverTrackID: g.CoverTrackID,
+			Artwork: artworkURL(g.CoverTrackID, g.HasArtwork),
+		})
 	}
-	out := make([]row, 0, len(by))
-	for _, r := range by {
-		out = append(out, *r)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Tracks != out[j].Tracks {
-			return out[i].Tracks > out[j].Tracks
-		}
-		return out[i].Artist < out[j].Artist
-	})
 	writeJSON(w, map[string]any{"artists": out, "count": len(out)})
 }
 
 func (s *Server) handleAlbums(w http.ResponseWriter, _ *http.Request) {
+	groups := library.GroupAlbums(s.Idx)
 	type row struct {
 		Artist       string `json:"artist"`
 		Album        string `json:"album"`
@@ -55,37 +41,13 @@ func (s *Server) handleAlbums(w http.ResponseWriter, _ *http.Request) {
 		CoverTrackID int64  `json:"cover_track_id,omitempty"`
 		Artwork      string `json:"artwork,omitempty"`
 	}
-	by := map[string]*row{}
-	n := s.Idx.Size()
-	for i := 0; i < n; i++ {
-		m := s.Idx.MetaAt(i)
-		album := strings.TrimSpace(m.Album)
-		if album == "" {
-			continue
-		}
-		artist := strings.TrimSpace(m.Artist)
-		key := strings.ToLower(artist) + "\x00" + strings.ToLower(album)
-		r := by[key]
-		if r == nil {
-			r = &row{Artist: artist, Album: album}
-			by[key] = r
-			r.CoverTrackID = m.ID
-			if m.ArtworkPath != "" {
-				r.Artwork = "/api/artwork/" + strconv.FormatInt(m.ID, 10)
-			}
-		}
-		r.Tracks++
+	out := make([]row, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, row{
+			Artist: g.Artist, Album: g.Album, Tracks: g.Tracks, CoverTrackID: g.CoverTrackID,
+			Artwork: artworkURL(g.CoverTrackID, g.HasArtwork),
+		})
 	}
-	out := make([]row, 0, len(by))
-	for _, r := range by {
-		out = append(out, *r)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Tracks != out[j].Tracks {
-			return out[i].Tracks > out[j].Tracks
-		}
-		return out[i].Album < out[j].Album
-	})
 	writeJSON(w, map[string]any{"albums": out, "count": len(out)})
 }
 

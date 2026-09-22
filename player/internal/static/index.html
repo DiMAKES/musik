@@ -34,6 +34,7 @@
         <button type="button" class="tab" data-view="player">Сейчас</button>
         <button type="button" class="tab" data-view="library">Библиотека</button>
         <button type="button" class="tab" data-view="profile">Профиль</button>
+        <button type="button" class="tab" data-view="upload">Загрузка</button>
         <button type="button" class="tab logout-tab" id="btn-logout" title="Выйти из аккаунта" hidden>Выйти</button>
       </nav>
     </header>
@@ -270,6 +271,46 @@
           <ul id="share-list" class="share-list"></ul>
         </div>
         <button type="button" class="btn" id="btn-logout-profile" hidden>Выйти</button>
+      </section>
+
+      <section id="view-upload" class="view">
+        <h1 class="page-title">Загрузка</h1>
+        <p class="sub">Перетащи файлы или папку альбома. Можно выбрать и кнопками ниже.</p>
+        <input id="upload-file" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,audio/*" hidden />
+        <input id="upload-files" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,audio/*" multiple hidden />
+        <input id="upload-folder" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,audio/*" webkitdirectory directory multiple hidden />
+        <div class="dropzone" id="upload-drop" tabindex="0">
+          <span class="upload-card-kicker">Drag and drop</span>
+          <strong>Брось сюда музыку</strong>
+          <span>Один трек, пачка файлов или целая папка. Структура альбома сохранится.</span>
+        </div>
+        <div class="upload-grid">
+          <button type="button" class="upload-card" id="btn-upload-file">
+            <span class="upload-card-kicker">Один трек</span>
+            <strong>Файл</strong>
+            <span>Выбрать один MP3, FLAC или другой аудиофайл</span>
+          </button>
+          <button type="button" class="upload-card" id="btn-upload-files">
+            <span class="upload-card-kicker">Несколько</span>
+            <strong>Файлы</strong>
+            <span>Загрузить сразу пачку треков без структуры папок</span>
+          </button>
+          <button type="button" class="upload-card" id="btn-upload-folder">
+            <span class="upload-card-kicker">Каталог</span>
+            <strong>Папка</strong>
+            <span>Сохранить альбом целиком, с относительными путями</span>
+          </button>
+        </div>
+        <div class="op-bar" id="op-bar" data-state="idle">
+          <div class="op-bar-head">
+            <strong id="op-title">Готово к загрузке</strong>
+            <span id="op-pct">0%</span>
+          </div>
+          <div class="op-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="op-track">
+            <div class="op-fill" id="op-fill"></div>
+          </div>
+          <p class="op-detail" id="op-detail">MP3, FLAC, M4A, WAV, OGG и Opus. Скрытые файлы и прочие форматы пропускаются.</p>
+        </div>
       </section>
     </main>
 
