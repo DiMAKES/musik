@@ -29,10 +29,15 @@ _RELOAD_KINDS = frozenset(
 )
 
 
-def _progress_cb(job_id: int):
+def _progress_cb(job_id: int, *, start: float = 0, span: float = 100):
     def _cb(progress: dict[str, Any]) -> None:
         try:
-            update_job_progress(job_id, progress)
+            mapped = dict(progress)
+            pct = progress.get("pct")
+            if isinstance(pct, (int, float)):
+                mapped["step_pct"] = round(float(pct), 2)
+                mapped["pct"] = round(start + (float(pct) / 100.0) * span, 2)
+            update_job_progress(job_id, mapped)
             log.info(
                 "job #%s progress %s",
                 job_id,
@@ -64,7 +69,13 @@ def _notify_player_reload(kind: str) -> None:
         log.warning("player reload notify failed: %s", exc)
 
 
-def _run_scan(payload: dict[str, Any], *, job_id: int | None = None) -> dict[str, Any]:
+def _run_scan(
+    payload: dict[str, Any],
+    *,
+    job_id: int | None = None,
+    progress_start: float = 0,
+    progress_span: float = 100,
+) -> dict[str, Any]:
     settings = get_settings()
     library = Path(payload["library"]) if payload.get("library") else settings.library
     result = scan_library(
@@ -72,24 +83,39 @@ def _run_scan(payload: dict[str, Any], *, job_id: int | None = None) -> dict[str
         extract_audio=not payload.get("tags_only", False),
         workers=payload.get("workers"),
         limit=payload.get("limit"),
-        on_progress=_progress_cb(job_id) if job_id is not None else None,
+        on_progress=(
+            _progress_cb(job_id, start=progress_start, span=progress_span)
+            if job_id is not None
+            else None
+        ),
     )
     return {
         "scanned": result.scanned,
         "upserted": result.upserted,
+        "skipped_unchanged": result.skipped_unchanged,
         "failed": result.failed,
         "inactivated": result.inactivated,
         "duplicates_marked": result.duplicates_marked,
     }
 
 
-def _run_embed(payload: dict[str, Any], *, job_id: int | None = None) -> dict[str, Any]:
+def _run_embed(
+    payload: dict[str, Any],
+    *,
+    job_id: int | None = None,
+    progress_start: float = 0,
+    progress_span: float = 100,
+) -> dict[str, Any]:
     settings = get_settings()
     result = embed_library(
         limit=payload.get("limit"),
         force=bool(payload.get("force", False)),
         workers=payload.get("workers", settings.embed_workers),
-        on_progress=_progress_cb(job_id) if job_id is not None else None,
+        on_progress=(
+            _progress_cb(job_id, start=progress_start, span=progress_span)
+            if job_id is not None
+            else None
+        ),
     )
     return {
         "total": result.total,
@@ -146,10 +172,14 @@ def _run_full_rescan(payload: dict[str, Any], *, job_id: int | None = None) -> d
     out: dict[str, Any] = {}
     if job_id is not None:
         update_job_progress(job_id, {"phase": "full_rescan", "message": "scan…", "pct": 0})
-    out["scan"] = _run_scan(payload, job_id=job_id)
+    out["scan"] = _run_scan(
+        payload, job_id=job_id, progress_start=0, progress_span=40
+    )
     if job_id is not None:
         update_job_progress(job_id, {"phase": "full_rescan", "message": "embed…", "pct": 40})
-    out["embed"] = _run_embed(payload, job_id=job_id)
+    out["embed"] = _run_embed(
+        payload, job_id=job_id, progress_start=40, progress_span=35
+    )
     if job_id is not None:
         update_job_progress(job_id, {"phase": "full_rescan", "message": "clusters…", "pct": 75})
     out["clusters"] = _run_clusters(payload)

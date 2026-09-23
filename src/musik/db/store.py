@@ -259,6 +259,15 @@ def get_track_by_path(path: str) -> dict[str, Any] | None:
         )
 
 
+def track_file_states() -> dict[str, dict[str, Any]]:
+    """Return the lightweight file state needed by incremental scans."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT path, file_mtime, file_size, is_active FROM tracks"
+        ).fetchall()
+        return {str(row["path"]): dict(row) for row in rows}
+
+
 def list_tracks_needing_embedding(
     *, limit: int | None = None, force: bool = False
 ) -> list[dict[str, Any]]:

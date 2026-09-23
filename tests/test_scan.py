@@ -49,4 +49,16 @@ def test_scan_library(tmp_path: Path, monkeypatch):
     assert result.failed == 0
     st = counts()
     assert st["tracks_total"] == 2
+
+    unchanged = scan_library(lib, extract_audio=True, workers=2)
+    assert unchanged.scanned == 2
+    assert unchanged.skipped_unchanged == 2
+    assert unchanged.upserted == 0
+
+    _make_wav(lib / "c.wav", freq=660)
+    incremental = scan_library(lib, extract_audio=False, workers=2)
+    assert incremental.scanned == 3
+    assert incremental.skipped_unchanged == 2
+    assert incremental.upserted == 1
+    assert counts()["tracks_total"] == 3
     get_settings.cache_clear()

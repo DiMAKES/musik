@@ -15,6 +15,7 @@ from musik.db import (
     mark_duplicates,
     mark_missing_inactive,
     set_genres,
+    track_file_states,
     update_audio_scalars,
     update_fingerprint_and_lufs,
     upsert_track,
@@ -112,12 +113,33 @@ def scan_library(
     settings = get_settings()
     ensure_db()
     files = iter_audio_files(library, settings)
-    if limit is not None:
-        files = files[:limit]
     workers = workers or settings.workers
     result = ScanResult(scanned=len(files))
+    known = track_file_states()
     seen: set[str] = set()
-    total = len(files)
+    pending: list[Path] = []
+    for path in files:
+        path_str = str(path.resolve())
+        seen.add(path_str)
+        state = known.get(path_str)
+        try:
+            stat = path.stat()
+        except OSError:
+            pending.append(path)
+            continue
+        if (
+            state
+            and int(state.get("is_active") or 0) == 1
+            and int(state.get("file_size") or -1) == int(stat.st_size)
+            and float(state.get("file_mtime") or -1) == float(stat.st_mtime)
+        ):
+            result.skipped_unchanged += 1
+        else:
+            pending.append(path)
+    if limit is not None:
+        pending = pending[:limit]
+
+    total = len(pending)
     done = 0
 
     def _emit() -> None:
@@ -148,7 +170,7 @@ def scan_library(
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {
                 pool.submit(_process_one, path, extract_audio=extract_audio): path
-                for path in files
+                for path in pending
             }
             for fut in as_completed(futures):
                 status, payload, err = fut.result()

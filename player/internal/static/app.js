@@ -23,6 +23,10 @@ let libTimer = null;
 let seeking = false;
 let toastTimer = null;
 let jobPollTimer = null;
+let backgroundJobsTimer = null;
+let uploadQueue = Promise.resolve();
+let uploadQueueDepth = 0;
+const knownJobStatuses = new Map();
 let favoriteIds = new Set();
 let favoriteArtists = new Set();
 let favoriteAlbums = new Set(); // "artist\0album"
@@ -1469,17 +1473,123 @@ function jobProgress(job) {
   };
 }
 
-async function waitForJob(id, { onProgress, tries = 180, intervalMs = 2000 } = {}) {
-  if (!id) return;
-  for (let i = 0; i < tries; i++) {
-    const j = await api(`/api/jobs/${id}`);
-    const prog = jobProgress(j);
-    if (onProgress) onProgress(j, prog);
-    if (j.status === "done") return j;
-    if (j.status === "failed") throw new Error(j.error || "Задание не удалось");
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+const JOB_NAMES = {
+  full_rescan: "Обновление библиотеки",
+  scan: "Сканирование",
+  embed: "Аудиоэмбеддинги",
+  clusters: "Кластеры",
+  daily: "Daily Mix",
+  album_tips: "Подсказки альбомов",
+  mix_pack: "Набор миксов",
+};
+
+const JOB_STATES = {
+  pending: "В очереди",
+  running: "Выполняется",
+  done: "Готово",
+  failed: "Ошибка",
+};
+
+function renderBackgroundJobs(jobs) {
+  const list = $("jobs-list");
+  const badge = $("jobs-badge");
+  if (!list || !badge) return;
+  const active = jobs.filter((job) => job.status === "pending" || job.status === "running");
+  badge.textContent = active.length ? `${active.length} активн.` : "нет активных";
+  list.replaceChildren();
+  if (!jobs.length) {
+    const empty = document.createElement("p");
+    empty.className = "jobs-empty";
+    empty.textContent = "Фоновых задач пока нет.";
+    list.append(empty);
+    return;
   }
-  throw new Error("Сканирование ещё идёт. Открой эту вкладку позже.");
+  jobs.slice(0, 12).forEach((job) => {
+    const progress = jobProgress(job);
+    const pct = job.status === "done"
+      ? 100
+      : Math.max(0, Math.min(100, progress.pct ?? 0));
+    const row = document.createElement("article");
+    row.className = "job-row";
+    row.dataset.status = job.status || "";
+
+    const head = document.createElement("div");
+    head.className = "job-row-head";
+    const title = document.createElement("strong");
+    title.textContent = `${JOB_NAMES[job.kind] || job.kind || "Задача"} #${job.id}`;
+    const state = document.createElement("span");
+    state.className = "job-state";
+    state.textContent = JOB_STATES[job.status] || job.status || "—";
+    head.append(title, state);
+
+    const track = document.createElement("div");
+    track.className = "job-progress";
+    const fill = document.createElement("span");
+    fill.style.setProperty("--job-pct", `${pct}%`);
+    track.append(fill);
+
+    const meta = document.createElement("div");
+    meta.className = "job-row-meta";
+    const message = document.createElement("span");
+    message.className = "job-message";
+    message.textContent = job.error || progress.detail || (job.status === "pending" ? "Ожидает запуска" : "—");
+    const percent = document.createElement("span");
+    percent.textContent = `${Math.round(pct)}%`;
+    meta.append(message, percent);
+    row.append(head, track, meta);
+    list.append(row);
+  });
+}
+
+async function refreshBackgroundJobs({ initial = false } = {}) {
+  const out = await api("/api/jobs?limit=20");
+  const jobs = Array.isArray(out?.jobs) ? out.jobs : [];
+  if (!initial) {
+    let libraryChanged = false;
+    jobs.forEach((job) => {
+      const previous = knownJobStatuses.get(job.id);
+      if (previous && previous !== job.status && job.status === "done") {
+        toast(`${JOB_NAMES[job.kind] || job.kind} завершено`);
+        if (["full_rescan", "scan", "embed", "clusters"].includes(job.kind)) {
+          libraryChanged = true;
+        }
+      } else if (previous && previous !== job.status && job.status === "failed") {
+        toast(`${JOB_NAMES[job.kind] || job.kind}: ошибка`);
+      }
+    });
+    if (libraryChanged) {
+      loadLibrary().catch(() => {});
+      loadHomeCatalog().catch(() => {});
+    }
+  }
+  jobs.forEach((job) => knownJobStatuses.set(job.id, job.status));
+  renderBackgroundJobs(jobs);
+  return jobs;
+}
+
+function startBackgroundJobsMonitor() {
+  clearInterval(backgroundJobsTimer);
+  refreshBackgroundJobs({ initial: true }).catch(console.error);
+  backgroundJobsTimer = setInterval(() => {
+    if (!document.hidden) refreshBackgroundJobs().catch(() => {});
+  }, 3000);
+}
+
+function queueMusicUpload(fileList) {
+  const files = [...fileList];
+  if (!files.length) return Promise.resolve();
+  const waiting = uploadQueueDepth;
+  uploadQueueDepth++;
+  if (waiting > 0) {
+    toast(`Добавлено в очередь загрузки: ${files.length}`);
+  }
+  uploadQueue = uploadQueue
+    .catch(() => {})
+    .then(() => uploadMusicFiles(files))
+    .finally(() => {
+      uploadQueueDepth = Math.max(0, uploadQueueDepth - 1);
+    });
+  return uploadQueue;
 }
 
 async function uploadMusicFiles(fileList) {
@@ -1553,44 +1663,22 @@ async function uploadMusicFiles(fileList) {
     }
     setOpBar({
       state: "run",
-      title: "Сканирование библиотеки",
-      detail: `На диске ${saved} файлов. Ищем треки и считаем эмбеддинги…`,
-      pct: 58,
+      title: "Постановка в очередь",
+      detail: `На диске ${saved} файлов. Создаём фоновую задачу…`,
+      pct: 95,
     });
     const job = await api("/api/library/rescan", { method: "POST", body: "{}" });
     const id = job.id || job.job_id;
-    const doneJob = await waitForJob(id, {
-      onProgress: (_j, prog) => {
-        const scanPct = prog.pct == null ? 58 : 58 + (prog.pct / 100) * 42;
-        setOpBar({
-          state: "run",
-          title: "Сканирование библиотеки",
-          detail: prog.detail || "Обработка новых треков…",
-          pct: scanPct,
-        });
-      },
-    });
-    await loadLibrary().catch(() => {});
-    const embed = doneJob?.result?.embed || {};
-    const failedEmb = Number(embed.failed || 0);
-    const computed = Number(embed.computed || 0) + Number(embed.from_cache || 0);
-    if (failedEmb > 0) {
-      setOpBar({
-        state: "error",
-        title: "Загружено, часть треков не обработана",
-        detail: `На диске ${saved}. Эмбеддинги: ок ${computed}, ошибка ${failedEmb}. Файлы уже в библиотеке, но радио их пока не возьмёт.`,
-        pct: 100,
-      });
-      return;
-    }
+    await refreshBackgroundJobs().catch(() => {});
     setOpBar({
       state: "done",
-      title: "Готово",
+      title: "Файлы загружены",
       detail: skipped
-        ? `Добавлено ${saved}, пропущено ${skipped}. Треки уже в библиотеке.`
-        : `Добавлено ${saved}. Треки уже в библиотеке.`,
+        ? `Добавлено ${saved}, пропущено ${skipped}. Обработка идёт в задаче #${id || "—"}.`
+        : `Добавлено ${saved}. Обработка идёт в задаче #${id || "—"}.`,
       pct: 100,
     });
+    toast(`Фоновая задача #${id || "—"} добавлена`);
   } catch (e) {
     setOpBar({
       state: "error",
@@ -1614,7 +1702,7 @@ function wireUploads() {
     if (!btn || !input) return;
     btn.onclick = () => input.click();
     input.onchange = () => {
-      if (input.files?.length) uploadMusicFiles(input.files).catch((e) => {
+      if (input.files?.length) queueMusicUpload(input.files).catch((e) => {
         setOpBar({ state: "error", title: "Ошибка", detail: e.message || String(e), pct: 0 });
       });
     };
@@ -1657,7 +1745,7 @@ function wireUploads() {
     dragDepth = 0;
     highlight(false);
     filesFromDataTransfer(e.dataTransfer)
-      .then((files) => uploadMusicFiles(files))
+      .then((files) => queueMusicUpload(files))
       .catch((err) => setOpBar({ state: "error", title: "Ошибка", detail: err.message || String(err), pct: 0 }));
   };
   [view].forEach((el) => {
@@ -1848,6 +1936,7 @@ function wire() {
 }
 
 async function bootApp() {
+  startBackgroundJobsMonitor();
   try {
     const p = await api("/api/profile");
     renderMaturity(p.maturity);
