@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from musik.db.migrations import LATEST_SCHEMA_VERSION, migrate_db
+from musik.db.schema import SCHEMA
+
+
+def _version(path) -> int:
+    with sqlite3.connect(path) as conn:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def test_fresh_migration_is_idempotent(tmp_path) -> None:
+    path = tmp_path / "fresh.db"
+    assert migrate_db(path) == LATEST_SCHEMA_VERSION
+    with sqlite3.connect(path) as conn:
+        before = conn.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    assert migrate_db(path) == LATEST_SCHEMA_VERSION
+    with sqlite3.connect(path) as conn:
+        after = conn.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    assert before == after
+    assert _version(path) == LATEST_SCHEMA_VERSION
+
+
+def test_legacy_database_reaches_same_schema_and_preserves_rows(tmp_path) -> None:
+    old_path = tmp_path / "old.db"
+    fresh_path = tmp_path / "fresh.db"
+    with sqlite3.connect(old_path) as conn:
+        conn.executescript(SCHEMA)
+        conn.executescript(
+            """
+            INSERT INTO tracks(id, path, title, created_at, updated_at)
+            VALUES (1, '/music/a.flac', 'A', 'now', 'now');
+            INSERT INTO listening_history(track_id, ts, action, weekday)
+            VALUES (1, 'now', 'finish', 0);
+            """
+        )
+
+    migrate_db(old_path)
+    migrate_db(fresh_path)
+    with sqlite3.connect(old_path) as old, sqlite3.connect(fresh_path) as fresh:
+        old_tables = {
+            row[0] for row in old.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        fresh_tables = {
+            row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert old_tables == fresh_tables
+        assert old.execute("SELECT title FROM tracks WHERE id=1").fetchone()[0] == "A"
+        # Legacy Python weekday 0 was Sunday; migration standardizes Monday=0.
+        assert old.execute("SELECT weekday FROM listening_history").fetchone()[0] == 6
+        assert _version(old_path) == _version(fresh_path) == LATEST_SCHEMA_VERSION
+
+
+def test_foundation_schema_has_normalized_references_and_versioned_json(tmp_path) -> None:
+    path = tmp_path / "foundation.db"
+    migrate_db(path)
+    with sqlite3.connect(path) as conn:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(playlists)")}
+        assert {"type", "rule_json", "archived_at", "updated_at"} <= cols
+        item_cols = {row[1] for row in conn.execute("PRAGMA table_info(playlist_tracks)")}
+        assert {"item_id", "source", "added_at"} <= item_cols
+        assert {
+            "recommendation_requests",
+            "request_contexts",
+            "event_contexts",
+            "taste_contexts",
+            "taste_context_states",
+            "session_contexts",
+            "entity_vectors",
+            "radio_rules",
+            "model_versions",
+            "training_runs",
+            "explore_arms",
+            "radio_prefs",
+            "transition_stats",
+            "custom_tags",
+            "track_tags",
+            "track_preferences",
+        } <= tables
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO taste_contexts(
+                       context_id, kind, name, activation_schema_version, activation_json,
+                       created_at, updated_at
+                   ) VALUES ('bad', 'mood', 'Bad', NULL, '{}', 'now', 'now')"""
+            )
+
+        conn.execute(
+            """INSERT INTO tracks(path, created_at, updated_at)
+               VALUES ('/music/event.flac', 'now', 'now')"""
+        )
+        track_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError, match="versioned JSON"):
+            conn.execute(
+                """INSERT INTO listening_history(
+                       track_id, ts, action, metadata_json
+                   ) VALUES (?, 'now', 'start', '{}')""",
+                (track_id,),
+            )
+        conn.execute(
+            """INSERT INTO listening_history(
+                   track_id, ts, action, event_id, event_schema_version
+               ) VALUES (?, 'now', 'start', 'event-1', 1)""",
+            (track_id,),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute(
+                "UPDATE listening_history SET action='finish' WHERE event_id='event-1'"
+            )

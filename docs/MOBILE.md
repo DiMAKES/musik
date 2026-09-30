@@ -4,6 +4,12 @@
 
 Канон маршрутов: [API.md](API.md) · OpenAPI: `GET /api/openapi.json` · PWA: [mobile/README.md](../mobile/README.md)
 
+Актуальный план backend: [ROADMAP.md](ROADMAP.md). Раздел B ниже — отдельный
+план Flutter-клиента, а не roadmap рекомендательной системы. Поля
+`request_id`/`impression_id` и новый event lifecycle добавляются в мобильный
+клиент только после стабилизации OpenAPI; multi-user на текущем этапе не
+реализуется.
+
 Ниже: (A) контракт API для любого native-клиента · (B) **полный план Flutter-приложения с 100% паритетом веб-UI**.
 
 ---
@@ -53,6 +59,32 @@ Jump: `POST /api/session/jump` `{session_id, index}`.
 ## A6. Ошибки
 
 `{"error":"…","code":"auth_required|not_found|…"}` · HTTP 400/401/404/503.
+
+## A7. Artwork
+
+`GET /api/artwork/{id}` требует auth (Bearer или cookie). Ответ — JPEG-миниатюра, не оригинал из тега.
+
+| Запрос | Размер | Где в UI |
+|--------|--------|----------|
+| без `w` или `?w=640` | 640 px | экран плеера |
+| `?w=256` | 256 px | карточки, полки |
+| `?w=96` | 96 px | списки, mini-player |
+| `?full=1` | оригинал | не для UI |
+
+Другие `w` прищёлкиваются к ближайшему из `{96, 256, 640}`. `Cache-Control: private, max-age=2592000`; повторный заход — 304 по ETag.
+
+Во Flutter: `CachedNetworkImage` с `httpHeaders: {Authorization: Bearer …}` (пакет не берёт Dio interceptor сам). `memCacheWidth` совпадает с `w` в URL, чтобы не держать декодированный 640 в RAM на списке:
+
+```
+artworkUrl(id, {w: 96|256|640})  →  $base/api/artwork/$id?w=$w
+CachedNetworkImage(
+  imageUrl: artworkUrl(id, w: size),
+  httpHeaders: {'Authorization': 'Bearer $token'},
+  memCacheWidth: size,
+)
+```
+
+Отдельный disk-cache писать не нужно: `cached_network_image` + долгий Cache-Control сервера достаточно.
 
 ---
 
@@ -112,7 +144,7 @@ Jump: `POST /api/session/jump` `{session_id, index}`.
 | 29 | Toast / ошибки | envelope | SnackBar | P0 |
 | 30 | Resume session | `GET /api/now?session_id=` | boot restore | P1 |
 | 31 | Background audio + lock screen | OS | audio_service / just_audio | P0 |
-| 32 | Artwork artwork с Bearer | `/api/artwork/{id}` | CachedNetworkImage + headers | P0 |
+| 32 | Artwork с Bearer, `?w=96\|256\|640` | `/api/artwork/{id}?w=` | `CachedNetworkImage` + headers + `memCacheWidth` | P0 |
 
 ---
 
@@ -126,7 +158,7 @@ Jump: `POST /api/session/jump` `{session_id, index}`.
 | Secure | `flutter_secure_storage` | API token / password optional |
 | Prefs | `shared_preferences` | base URL, last session_id |
 | Audio | `just_audio` + `audio_service` | background, media controls, Range |
-| Images | `cached_network_image` | artwork с auth headers |
+| Images | `cached_network_image` | artwork с Bearer; URL `?w=96\|256\|640` и `memCacheWidth` по месту |
 | Share | `share_plus` | share radio URL |
 | Clipboard | `flutter/services` | copy link |
 | Routing | `go_router` | tabs + login redirect |
@@ -176,7 +208,7 @@ lib/
     discover/tips_sheet.dart
   services/
     audio_handler.dart     # audio_service wrapper
-    artwork_cache.dart
+    artwork_cache.dart     # CachedNetworkImage + Bearer; URL ?w=96|256|640
 ```
 
 **Правило:** UI не вызывает Dio напрямую — только repositories / `PlaybackController`.
@@ -268,7 +300,7 @@ position, duration,
 authMe, login, logout
 health, profile, metricsWeekly, status
 library, artists, albums, track(id)
-streamUrl(id), artworkUrl(id)          // builders
+streamUrl(id), artworkUrl(id, {w})     // builders; w: 96 список, 256 карточка, 640 плеер
 radioStart, play, sessionJump, sessionStart
 now, queue, queueRefresh
 events(EventBody)

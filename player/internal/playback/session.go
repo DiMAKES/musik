@@ -8,6 +8,7 @@ import (
 
 	"github.com/torwin-job/musik/player/internal/db"
 	"github.com/torwin-job/musik/player/internal/queue"
+	"github.com/torwin-job/musik/player/internal/taste"
 )
 
 // Session holds per-tab / per-client playback state.
@@ -17,7 +18,9 @@ type Session struct {
 	ID                string
 	Mode              string // radio|session|daily|playlist|later|listen|share
 	Current           int64
+	CurrentItem       queue.Item
 	Prev              int64
+	BackStack         []queue.Item
 	Queue             []queue.Item
 	Exclude           map[int64]bool
 	Rated             map[int64]string // track_id → like|dislike
@@ -28,6 +31,9 @@ type Session struct {
 	LastQueueAt       time.Time
 	LastProgressWrite time.Time
 	UpdatedAt         time.Time
+	TasteState         taste.SessionState
+	ActiveContextIDs   []string
+	TransitionProfile  string
 }
 
 func (s *Session) Lock()   { s.mu.Lock() }
@@ -93,6 +99,12 @@ func hydrate(row db.PlaySessionRow) *Session {
 	if row.QueueJSON != "" {
 		_ = json.Unmarshal([]byte(row.QueueJSON), &sess.Queue)
 	}
+	if row.CurrentItemJSON != "" {
+		_ = json.Unmarshal([]byte(row.CurrentItemJSON), &sess.CurrentItem)
+	}
+	if row.TasteStateJSON != "" {
+		_ = json.Unmarshal([]byte(row.TasteStateJSON), &sess.TasteState)
+	}
 	if row.ExcludeJSON != "" {
 		var ids []int64
 		if json.Unmarshal([]byte(row.ExcludeJSON), &ids) == nil {
@@ -107,6 +119,10 @@ func hydrate(row db.PlaySessionRow) *Session {
 	if row.DailyIDsJSON != "" {
 		_ = json.Unmarshal([]byte(row.DailyIDsJSON), &sess.DailyIDs)
 	}
+	if row.ActiveContextsJSON != "" {
+		_ = json.Unmarshal([]byte(row.ActiveContextsJSON), &sess.ActiveContextIDs)
+	}
+	sess.TransitionProfile = row.TransitionProfile
 	return sess
 }
 
@@ -121,6 +137,8 @@ func (e *Engine) persistLocked(sess *Session) {
 	playlistName := sess.PlaylistName
 	playlistKind := sess.PlaylistKind
 	queueItems := append([]queue.Item(nil), sess.Queue...)
+	currentItem := sess.CurrentItem
+	tasteState := sess.TasteState
 	exclude := make([]int64, 0, len(sess.Exclude))
 	for id := range sess.Exclude {
 		exclude = append(exclude, id)
@@ -130,17 +148,24 @@ func (e *Engine) persistLocked(sess *Session) {
 		rated[trackID] = rating
 	}
 	dailyIDs := append([]int64(nil), sess.DailyIDs...)
+	contextIDs := append([]string(nil), sess.ActiveContextIDs...)
+	profile := sess.TransitionProfile
 	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	e.enqueue(func() {
 		qj, _ := json.Marshal(queueItems)
+		cij, _ := json.Marshal(currentItem)
+		tsj, _ := json.Marshal(tasteState)
 		ej, _ := json.Marshal(exclude)
 		rj, _ := json.Marshal(rated)
 		dj, _ := json.Marshal(dailyIDs)
+		cj, _ := json.Marshal(contextIDs)
 		_ = e.Store.UpsertPlaySession(db.PlaySessionRow{
 			ID: id, Mode: mode, CurrentID: current,
 			QueueJSON: string(qj), ExcludeJSON: string(ej), RatedJSON: string(rj),
 			DailyIDsJSON: string(dj), DailyPos: dailyPos,
 			PlaylistName: playlistName, PlaylistKind: playlistKind,
+			CurrentItemJSON: string(cij), TasteStateJSON: string(tsj),
+			ActiveContextsJSON: string(cj), TransitionProfile: profile,
 			UpdatedAt: updatedAt,
 		})
 	})
@@ -153,6 +178,7 @@ func (e *Engine) gcLocked() {
 		stale := sess.UpdatedAt.Before(cutoffRAM)
 		sess.mu.Unlock()
 		if stale {
+			_ = e.Store.AbandonSessionImpressions(id)
 			delete(e.sessions, id)
 		}
 	}
@@ -162,6 +188,7 @@ func (e *Engine) gcLocked() {
 		if n, err := e.Store.CountPlaySessions(); err == nil && n > maxSessions {
 			ids, _ := e.Store.OldestPlaySessionIDs(n - maxSessions)
 			for _, id := range ids {
+				_ = e.Store.AbandonSessionImpressions(id)
 				_ = e.Store.DeletePlaySession(id)
 				delete(e.sessions, id)
 			}
@@ -183,6 +210,7 @@ func (e *Engine) gcLocked() {
 			}
 		}
 		delete(e.sessions, oldestID)
+		_ = e.Store.AbandonSessionImpressions(oldestID)
 		_ = e.Store.DeletePlaySession(oldestID)
 	}
 }

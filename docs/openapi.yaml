@@ -2,7 +2,15 @@ openapi: 3.0.3
 info:
   title: musik API
   version: 1.0.0
-  description: Local CLAP-powered music player API. Single-owner auth via password cookie or Bearer token.
+  description: >-
+    Current local CLAP-powered player API. Single-owner auth uses a password
+    cookie or Bearer token. The Python worker owns database migrations; the Go
+    player requires an exactly supported PRAGMA user_version. Radio current/queue
+    items carry request_id/impression_id/source; events are idempotent by event_id.
+    Context, radio-rule and user/smart playlist endpoints are part of the
+    current API. Radio uses a single queue-core orchestrator, optional learned
+    ranker, and gated Thompson exploration within UI bounds.
+  x-musik-schema-version: 5
 servers:
 - url: http://127.0.0.1:8787
 components:
@@ -39,6 +47,44 @@ components:
           type: string
         artwork:
           type: string
+        impression_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        request_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        source:
+          type: string
+    PlaybackEvent:
+      type: object
+      required: [type, event_id, track_id, session_id]
+      properties:
+        type:
+          type: string
+          enum: [track_start, progress, track_end, skip, like, dislike]
+        event_id:
+          type: string
+          minLength: 1
+        impression_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        track_id:
+          type: integer
+        session_id:
+          type: string
+        client_id:
+          type: string
+        device_id:
+          type: string
+        position_sec:
+          type: number
+        duration_sec:
+          type: number
+        listened_sec:
+          type: number
+        reason:
+          type: string
+          enum: [completed, skipped, next, '']
 security:
 - bearerAuth: []
 - cookieAuth: []
@@ -192,9 +238,17 @@ paths:
   /api/events:
     post:
       summary: Playback events
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaybackEvent'
       responses:
         '200':
           description: ok / next
+        '409':
+          description: Legacy fallback matched more than one pending impression
   /api/mixes:
     get:
       summary: Mix shelves
@@ -325,13 +379,13 @@ paths:
       summary: Seven-day listening and recommendation outcomes
       responses:
         '200':
-          description: Listen, completion, diversity and explore/exploit rates
+          description: Outcome/source/daypart/maturity/date slices and baseline readiness
   /api/metrics/recommendations:
     get:
-      summary: Recommendation latency and seven-day outcomes
+      summary: Recommendation latency and 90-day outcome baseline
       responses:
         '200':
-          description: In-memory p50/p95/p99 latency plus persisted impression outcomes
+          description: 90-day outcomes, latency, last policy, training runs and explore/bandit state
   /listen/{token}:
     get:
       security: []
@@ -368,18 +422,56 @@ paths:
       responses:
         '200':
           description: Taste maturity, signals, and confidence
+  /api/profile/explore:
+    put:
+      summary: Update explore bounds
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                explore_lo:
+                  type: number
+                explore_hi:
+                  type: number
+      responses:
+        '200':
+          description: Clamped explore bounds and bandit readiness
   /api/artwork/{id}:
     get:
       summary: Track artwork
+      description: >-
+        JPEG thumbnails at 96, 256 or 640 px (other `w` values snap to nearest).
+        Omit `w` to get 640. Pass `full=1` for the original embedded file.
       parameters:
       - name: id
         in: path
         required: true
         schema:
           type: integer
+      - name: w
+        in: query
+        required: false
+        description: Target width; snapped to 96, 256, or 640. Default 640.
+        schema:
+          type: integer
+      - name: full
+        in: query
+        required: false
+        description: If 1, serve the original artwork instead of a JPEG thumbnail.
+        schema:
+          type: integer
+          enum: [1]
       responses:
         '200':
-          description: Artwork image
+          description: Artwork image (image/jpeg thumbnail, or original for full=1)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: private, max-age=2592000 for thumbnails; 86400 for full=1
   /api/similar/{id}:
     get:
       summary: Similar tracks
@@ -407,6 +499,12 @@ paths:
   /api/session/jump:
     post:
       summary: Jump within fixed session
+      responses:
+        '200':
+          description: Updated session position
+  /api/session/back:
+    post:
+      summary: Return to the previous track
       responses:
         '200':
           description: Updated session position

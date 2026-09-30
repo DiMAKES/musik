@@ -45,7 +45,7 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		"session_id": sess.ID,
 		"mode":       sess.Mode,
 		"maturity":   s.Play.Maturity(),
-		"current":    s.trackJSON(sess.Current),
+		"current":    s.sessionCurrentJSON(sess),
 		"queue":      sess.Queue,
 		"name":       sess.PlaylistName,
 		"kind":       sess.PlaylistKind,
@@ -76,6 +76,29 @@ func (s *Server) handleSessionJump(w http.ResponseWriter, r *http.Request) {
 	sess.Lock()
 	defer sess.Unlock()
 	if err := s.Play.Jump(sess, req.Index, req.TrackID); err != nil {
+		writeErr(w, playHTTPStatus(err), "play", err.Error())
+		return
+	}
+	out := s.playResponse(sess)
+	out["ok"] = true
+	writeJSON(w, out)
+}
+
+func (s *Server) handleSessionBack(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad_json", "bad json")
+		return
+	}
+	sess := s.requireSession(w, r, req.SessionID)
+	if sess == nil {
+		return
+	}
+	sess.Lock()
+	defer sess.Unlock()
+	if err := s.Play.Back(sess); err != nil {
 		writeErr(w, playHTTPStatus(err), "play", err.Error())
 		return
 	}

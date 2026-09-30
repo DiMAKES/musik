@@ -142,21 +142,3 @@ def resolve_taste(index: EmbeddingIndex | None = None) -> tuple[np.ndarray, str]
     if built.embedding.size:
         return built.embedding.astype(np.float32), "history_rebuild"
     return idx.centroid(), "library_centroid"
-
-
-def epsilon_explore_mask(size: int, explore_ratio: float, rng: np.random.Generator) -> np.ndarray:
-    """Boolean mask of length `size`: True = exploration slot."""
-    n_ex = int(round(size * explore_ratio))
-    n_ex = max(0, min(size, n_ex))
-    if size >= 5:
-        n_ex = max(1, n_ex) if explore_ratio > 0 else 0
-    mask = np.zeros(size, dtype=bool)
-    if n_ex == 0:
-        return mask
-    positions = np.linspace(2, size - 1, num=n_ex, dtype=int)
-    mask[positions] = True
-    if n_ex > 1:
-        extras = rng.choice(size, size=min(n_ex, size), replace=False)
-        mask[:] = False
-        mask[extras] = True
-    return mask

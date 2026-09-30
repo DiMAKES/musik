@@ -32,25 +32,31 @@ ORDER BY weight DESC LIMIT 50000`)
 }
 
 type PlaySessionRow struct {
-	ID           string
-	Mode         string
-	CurrentID    int64
-	QueueJSON    string
-	ExcludeJSON  string
-	RatedJSON    string
-	DailyIDsJSON string
-	DailyPos     int
-	PlaylistName string
-	PlaylistKind string
-	UpdatedAt    string
+	ID              string
+	Mode            string
+	CurrentID       int64
+	QueueJSON       string
+	ExcludeJSON     string
+	RatedJSON       string
+	DailyIDsJSON    string
+	DailyPos        int
+	PlaylistName    string
+	PlaylistKind    string
+	CurrentItemJSON string
+	TasteStateJSON      string
+	ActiveContextsJSON  string
+	TransitionProfile   string
+	UpdatedAt           string
 }
 
 func (s *Store) UpsertPlaySession(row PlaySessionRow) error {
 	_, err := s.DB.Exec(`
 INSERT INTO play_sessions(
   id, mode, current_id, queue_json, exclude_json, rated_json,
-  daily_ids_json, daily_pos, playlist_name, playlist_kind, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+  daily_ids_json, daily_pos, playlist_name, playlist_kind, current_item_json,
+  taste_state_schema_version, taste_state_json, active_contexts_json,
+  transition_profile, updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   mode=excluded.mode,
   current_id=excluded.current_id,
@@ -61,22 +67,38 @@ ON CONFLICT(id) DO UPDATE SET
   daily_pos=excluded.daily_pos,
   playlist_name=excluded.playlist_name,
   playlist_kind=excluded.playlist_kind,
+  current_item_json=excluded.current_item_json,
+  taste_state_schema_version=excluded.taste_state_schema_version,
+  taste_state_json=excluded.taste_state_json,
+  active_contexts_json=excluded.active_contexts_json,
+  transition_profile=excluded.transition_profile,
   updated_at=excluded.updated_at`,
 		row.ID, row.Mode, row.CurrentID, nullStr(row.QueueJSON), nullStr(row.ExcludeJSON),
 		nullStr(row.RatedJSON), nullStr(row.DailyIDsJSON), row.DailyPos,
-		row.PlaylistName, row.PlaylistKind, row.UpdatedAt)
+		row.PlaylistName, row.PlaylistKind, nullStr(row.CurrentItemJSON),
+		nullStr(row.TasteStateJSON), nullStr(row.ActiveContextsJSON),
+		func() string {
+			if row.TransitionProfile == "" {
+				return "smooth"
+			}
+			return row.TransitionProfile
+		}(), row.UpdatedAt)
 	return err
 }
 
 func (s *Store) LoadPlaySession(id string) (PlaySessionRow, bool, error) {
 	var row PlaySessionRow
-	var q, ex, rated, daily sql.NullString
+	var q, ex, rated, daily, currentItem, tasteState, contexts sql.NullString
+	var profile sql.NullString
 	err := s.DB.QueryRow(`
 SELECT id, mode, current_id, queue_json, exclude_json, rated_json,
-       daily_ids_json, daily_pos, playlist_name, playlist_kind, updated_at
+       daily_ids_json, daily_pos, playlist_name, playlist_kind,
+       current_item_json, taste_state_json, active_contexts_json,
+       transition_profile, updated_at
 FROM play_sessions WHERE id = ?`, id).Scan(
 		&row.ID, &row.Mode, &row.CurrentID, &q, &ex, &rated, &daily,
-		&row.DailyPos, &row.PlaylistName, &row.PlaylistKind, &row.UpdatedAt)
+		&row.DailyPos, &row.PlaylistName, &row.PlaylistKind, &currentItem,
+		&tasteState, &contexts, &profile, &row.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return PlaySessionRow{}, false, nil
 	}
@@ -94,6 +116,18 @@ FROM play_sessions WHERE id = ?`, id).Scan(
 	}
 	if daily.Valid {
 		row.DailyIDsJSON = daily.String
+	}
+	if currentItem.Valid {
+		row.CurrentItemJSON = currentItem.String
+	}
+	if tasteState.Valid {
+		row.TasteStateJSON = tasteState.String
+	}
+	if contexts.Valid {
+		row.ActiveContextsJSON = contexts.String
+	}
+	if profile.Valid {
+		row.TransitionProfile = profile.String
 	}
 	return row, true, nil
 }

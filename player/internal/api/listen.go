@@ -56,6 +56,8 @@ func (s *Server) handleListenShare(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Accept-Ranges", "none")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("icy-name", "musik radio")
 	w.Header().Set("icy-genre", "Various")

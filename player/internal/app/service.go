@@ -19,7 +19,7 @@ import (
 
 var reloadKinds = map[string]bool{
 	"embed": true, "full_rescan": true, "clusters": true,
-	"daily": true, "album_tips": true, "mix_pack": true,
+	"daily": true, "album_tips": true, "mix_pack": true, "train_ranker": true,
 }
 
 type Service struct {
@@ -60,6 +60,13 @@ func (s *Service) Reload() error {
 	log.Printf("reloaded index n=%d dim=%d maturity=%s", s.Idx.Size(), s.Idx.Dim(),
 		s.Taste.Maturity(s.Cfg.ProfileFormingAt, s.Cfg.ProfileReadyAt))
 	s.Play.ReloadTransitions()
+	s.Play.ReloadRanker()
+	entityRows := s.Idx.EntityVectorRows(db.EntityModelVersion)
+	go func() {
+		if err := s.Store.ReplaceEntityVectors(db.EntityModelVersion, entityRows); err != nil {
+			log.Printf("entity vectors refresh: %v", err)
+		}
+	}()
 	return nil
 }
 

@@ -17,19 +17,29 @@ import (
 )
 
 type Meta struct {
-	ID          int64
-	Path        string
-	Title       string
-	Artist      string
-	Album       string
-	Duration    float64
-	FileMD5     string
-	CreatedAt   time.Time
-	ArtworkPath string
-	ClusterID   int
-	Shown       int
-	SkipEarly   int
-	Completed   int
+	ID           int64
+	Path         string
+	Title        string
+	Artist       string
+	Album        string
+	Duration     float64
+	FileMD5      string
+	CreatedAt    time.Time
+	ArtworkPath  string
+	ClusterID    int
+	Shown        int
+	SkipEarly    int
+	Completed    int
+	Year         int
+	BPM          float64
+	LUFS         float64
+	HasBPM       bool
+	HasLUFS      bool
+	KeyName      string
+	Plays        int
+	Finishes     int
+	EarlySkips   int
+	LastPlayedAt time.Time
 }
 
 type Index struct {
@@ -136,11 +146,18 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 		if created.IsZero() {
 			created, _ = time.Parse(time.RFC3339, r.CreatedAt)
 		}
+		lastPlayed, _ := time.Parse(time.RFC3339Nano, r.LastPlayedAt)
+		if lastPlayed.IsZero() {
+			lastPlayed, _ = time.Parse(time.RFC3339, r.LastPlayedAt)
+		}
 		meta[i] = Meta{
 			ID: r.ID, Path: r.Path, Title: r.Title, Artist: r.Artist, Album: r.Album,
 			Duration: r.Duration, FileMD5: r.FileMD5, CreatedAt: created,
 			ArtworkPath: r.ArtworkPath, ClusterID: r.ClusterID,
 			Shown: r.Shown, SkipEarly: r.SkipEarly, Completed: r.Completed,
+			Year: r.Year, BPM: r.BPM, LUFS: r.LUFS, HasBPM: r.HasBPM, HasLUFS: r.HasLUFS,
+			KeyName: r.KeyName, Plays: r.Plays, Finishes: r.Finishes, EarlySkips: r.EarlySkips,
+			LastPlayedAt: lastPlayed,
 		}
 		idRow[r.ID] = i
 		if r.FileMD5 != "" {
@@ -503,6 +520,30 @@ func (idx *Index) SimsTo(vec []float32) []float32 {
 		}(lo, hi)
 	}
 	wg.Wait()
+	return out
+}
+
+// FusedSimsTo computes exact cosine scores for several queries while each
+// matrix row is hot. Results are query-major: result[q][row].
+func (idx *Index) FusedSimsTo(vectors ...[]float32) [][]float32 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	out := make([][]float32, len(vectors))
+	for q, vec := range vectors {
+		out[q] = make([]float32, idx.N)
+		if len(vec) != idx.D {
+			return out
+		}
+	}
+	for row := 0; row < idx.N; row++ {
+		off := row * idx.D
+		for d := 0; d < idx.D; d++ {
+			value := idx.Matrix[off+d]
+			for q, vec := range vectors {
+				out[q][row] += value * vec[d]
+			}
+		}
+	}
 	return out
 }
 

@@ -1,12 +1,14 @@
 package playback
 
 import (
+	"encoding/json"
 	"math"
 	"time"
 
 	"github.com/torwin-job/musik/player/internal/db"
 	"github.com/torwin-job/musik/player/internal/index"
 	"github.com/torwin-job/musik/player/internal/queue"
+	"github.com/torwin-job/musik/player/internal/taste"
 )
 
 func (e *Engine) ExcludeTrack(sess *Session, trackID int64) {
@@ -72,7 +74,7 @@ func (e *Engine) pickTasteStart(sess *Session) int64 {
 	}
 
 	k := 20
-	top := e.Idx.TopK(e.tasteForQueue(), k, nil)
+	top := e.Idx.TopK(e.tasteForQueue(sess), k, nil)
 	if len(top) == 0 {
 		return e.Builder.PickRandom(recent)
 	}
@@ -121,26 +123,16 @@ func (e *Engine) pickTasteStart(sess *Session) int64 {
 	return e.Idx.MetaAt(candidates[len(candidates)-1].row).ID
 }
 
-func (e *Engine) tasteForQueue() []float32 {
-	g := e.Taste.Get()
-	if len(g) == 0 {
-		return g
-	}
+func (e *Engine) tasteForQueue(sess *Session) []float32 {
 	dp := db.DayPart(time.Now().Hour())
-	blob, err := e.Store.LatestProfile(dp)
-	if err != nil || len(blob) == 0 {
-		return g
+	if e.TasteState != nil {
+		if sess == nil {
+			return e.TasteState.Effective(dp, nil, taste.DefaultDaypartMinimum)
+		}
+		base := e.TasteState.Effective(dp, &sess.TasteState, taste.DefaultDaypartMinimum)
+		return taste.BlendContexts(base, e.contextBlends(sess.ActiveContextIDs))
 	}
-	d := index.BytesToFloat32(blob)
-	if len(d) != len(g) {
-		return g
-	}
-	out := make([]float32, len(g))
-	for i := range g {
-		out[i] = 0.7*g[i] + 0.3*d[i]
-	}
-	index.Normalize(out)
-	return out
+	return e.Taste.Get()
 }
 
 func (e *Engine) transitionsFrom(currentID int64) map[int64]float64 {
@@ -160,35 +152,124 @@ func (e *Engine) transitionsFrom(currentID int64) map[int64]float64 {
 	return out
 }
 
-func (e *Engine) RefreshQueue(sess *Session, currentID int64, countImpressions bool) {
+func (e *Engine) RefreshQueue(sess *Session, currentID int64, reason string) {
 	started := time.Now()
 	defer func() { e.observe("queue_build", time.Since(started)) }()
-	opts := queue.BuildOpts{
-		ExploreRatio:    e.Explore(),
-		Discover:        e.Discovering(),
-		TransitionsFrom: e.transitionsFrom(currentID),
+	previous := append([]queue.Item(nil), sess.Queue...)
+	e.applyHardBlocks(sess)
+	size := e.Cfg.QueueSize
+	if size < 1 {
+		size = 6
 	}
-	sess.Queue = e.Builder.BuildOpts(currentID, e.tasteForQueue(), sess.Exclude, opts)
+	dp := db.DayPart(time.Now().Hour())
+	prefs := e.radioPrefs()
+	decision := queue.DecideExplore(queue.ExploreInput{
+		Arms: e.exploreArms(), Counts: e.exploreCounts(), Size: size,
+		Lo: prefs.ExploreLo, Hi: prefs.ExploreHi, Discover: e.Discovering(),
+		Now: time.Now().UTC(), Rng: e.Builder.ForkRNG(),
+	})
+	model := e.Ranker
+	built := e.Builder.BuildCore(queue.CoreOpts{
+		CurrentID: currentID, Taste: e.tasteForQueue(sess),
+		Session: sess.TasteState.Positive.Vector, Daypart: e.daypartVector(dp),
+		Centroids: e.tasteCentroidVecs(), Contexts: e.contextBlends(sess.ActiveContextIDs),
+		Exclude: sess.Exclude, Rules: e.sessionRules(sess),
+		Transitions: e.transitionsFrom(currentID),
+		Profile:     queue.TransitionProfile(sess.TransitionProfile),
+		Size:        size, Model: &model,
+		Negative: func(vector []float32) float64 {
+			return e.TasteState.NegativePenalty(vector, &sess.TasteState)
+		},
+		DaypartName: dp, ContextIDs: sess.ActiveContextIDs,
+		Discover: e.Discovering(), Allocation: &decision,
+	})
+	if reason != "" && sess.Mode != "share" {
+		requestID := db.NewID()
+		previousByTrack := make(map[int64]queue.Item, len(previous))
+		for _, item := range previous {
+			if item.ImpressionID != "" {
+				previousByTrack[item.TrackID] = item
+			}
+		}
+		kept := map[string]bool{}
+		newImpressions := make([]db.RecommendationImpression, 0, len(built))
+		for position := range built {
+			item := &built[position]
+			if existing, ok := previousByTrack[item.TrackID]; ok {
+				item.ImpressionID = existing.ImpressionID
+				item.RequestID = existing.RequestID
+				item.Source = existing.Source
+				item.FeaturesJSON = existing.FeaturesJSON
+				kept[existing.ImpressionID] = true
+				continue
+			}
+			item.ImpressionID = db.NewID()
+			item.RequestID = requestID
+			newImpressions = append(newImpressions, db.RecommendationImpression{
+				ImpressionID: item.ImpressionID, RequestID: requestID,
+				SessionID: sess.ID, TrackID: item.TrackID, Position: position,
+				Score: item.Score, CosineTaste: item.CosineTaste,
+				CosineCurrent: item.CosineCur, Explore: item.Explore,
+				NewBoost: item.NewBoost, Maturity: e.Maturity(), Mode: sess.Mode,
+				Source: item.Source, FeaturesJSON: item.FeaturesJSON,
+			})
+		}
+		var superseded []string
+		for _, item := range previous {
+			if item.ImpressionID != "" && !kept[item.ImpressionID] {
+				superseded = append(superseded, item.ImpressionID)
+			}
+		}
+		policy, _ := json.Marshal(map[string]any{
+			"schema_version":  queue.PolicySchemaVersion,
+			"explore_enabled": decision.Enabled,
+			"explore_share":   decision.ExploreShare,
+			"sampled_p":       decision.SampledP,
+			"source_p":        decision.SourceP,
+			"allocation":      decision.SourceShare,
+			"bounds":          []float64{decision.Bounds[0], decision.Bounds[1]},
+			"reason":          decision.Reason,
+		})
+		_ = e.Store.CreateRecommendationRequest(db.RecommendationRequest{
+			RequestID: requestID, SessionID: sess.ID, Reason: reason,
+			PolicyVersion: "queue-core-v1", ModelVersion: model.ModelVersion,
+			CandidateCount: e.Idx.Size(),
+			LatencyMS:      float64(time.Since(started).Microseconds()) / 1000,
+			PolicyJSON:     string(policy),
+		}, newImpressions, superseded)
+		_ = e.Store.AttachRequestContexts(requestID, sess.ActiveContextIDs)
+	}
+	sess.Queue = built
 	sess.LastQueueAt = time.Now()
 	sess.UpdatedAt = time.Now()
 	e.persistLocked(sess)
 	e.warm(sess)
-	if !countImpressions {
+}
+
+func (e *Engine) createCurrentImpression(sess *Session, source, reason string) {
+	if sess == nil || sess.Current == 0 || source == "" || sess.Mode == "share" {
 		return
 	}
-	impressions := make([]db.RecommendationImpression, 0, len(sess.Queue))
-	maturity := e.Maturity()
-	for position, q := range sess.Queue {
-		impressions = append(impressions, db.RecommendationImpression{
-			SessionID: sess.ID, TrackID: q.TrackID, Position: position,
-			Score: q.Score, CosineTaste: q.CosineTaste, CosineCurrent: q.CosineCur,
-			Explore: q.Explore, NewBoost: q.NewBoost, Maturity: maturity, Mode: sess.Mode,
-		})
-		e.Idx.BumpShownLocal(q.TrackID)
+	item := queue.Item{TrackID: sess.Current, ImpressionID: db.NewID(), RequestID: db.NewID(), Source: source}
+	if row, ok := e.Idx.RowOf(sess.Current); ok {
+		meta := e.Idx.MetaAt(row)
+		item.Artist, item.Title, item.Album = meta.Artist, meta.Title, meta.Album
+		item.Path, item.Duration, item.ClusterID = meta.Path, meta.Duration, meta.ClusterID
 	}
-	e.enqueue(func() {
-		_ = e.Store.InsertRecommendationImpressions(impressions)
-	})
+	item.FeaturesJSON = `{"schema_version":1,"start":true}`
+	err := e.Store.CreateRecommendationRequest(db.RecommendationRequest{
+		RequestID: item.RequestID, SessionID: sess.ID, Reason: reason,
+		PolicyVersion: "queue-core-v1", ModelVersion: e.Ranker.ModelVersion,
+		CandidateCount: e.Idx.Size(),
+	}, []db.RecommendationImpression{{
+		ImpressionID: item.ImpressionID, RequestID: item.RequestID,
+		SessionID: sess.ID, TrackID: sess.Current, Position: 0,
+		Maturity: e.Maturity(), Mode: sess.Mode, Source: source,
+		FeaturesJSON: item.FeaturesJSON,
+	}}, nil)
+	if err == nil {
+		sess.CurrentItem = item
+	}
 }
 
 func (e *Engine) RebuildFixedQueue(sess *Session) {
@@ -223,8 +304,12 @@ func (e *Engine) Advance(sess *Session) int64 {
 		sess.DailyPos++
 		if sess.DailyPos < len(sess.DailyIDs) {
 			nextID = sess.DailyIDs[sess.DailyPos]
+			if nextID != sess.Current {
+				e.rememberBack(sess)
+			}
 			sess.Prev = sess.Current
 			sess.Current = nextID
+			sess.CurrentItem = queue.Item{}
 			e.ExcludeTrack(sess, nextID)
 			e.RebuildFixedQueue(sess)
 			sess.UpdatedAt = time.Now()
@@ -243,17 +328,24 @@ func (e *Engine) Advance(sess *Session) int64 {
 		sess.Mode = "radio"
 	}
 	if len(sess.Queue) > 0 {
-		nextID = sess.Queue[0].TrackID
+		sess.CurrentItem = sess.Queue[0]
+		nextID = sess.CurrentItem.TrackID
 		sess.Queue = sess.Queue[1:]
 	} else if sess.Mode == "radio" || sess.Mode == "session" || sess.Mode == "share" {
 		nextID = e.Builder.PickRandom(sess.Exclude)
+	}
+	if nextID != 0 && nextID != sess.Current {
+		e.rememberBack(sess)
 	}
 	sess.Prev = sess.Current
 	if nextID != 0 {
 		sess.Current = nextID
 		e.ExcludeTrack(sess, nextID)
+		if sess.CurrentItem.TrackID != nextID {
+			e.createCurrentImpression(sess, "refill", "refill")
+		}
 		if len(sess.Queue) < e.Cfg.QueueSize/2 {
-			e.RefreshQueue(sess, nextID, true)
+			e.RefreshQueue(sess, nextID, "refill")
 		} else {
 			sess.UpdatedAt = time.Now()
 			e.persistLocked(sess)
@@ -267,11 +359,15 @@ func (e *Engine) Advance(sess *Session) int64 {
 }
 
 func (e *Engine) PersistTaste(trackVec []float32, signed, alpha float64) {
+	if signed <= 0 {
+		return
+	}
 	blob := index.Float32Bytes(e.Taste.Get())
 	_ = e.Store.SaveProfile("global", blob)
 	_ = e.Store.PruneProfiles("global", 50)
 
 	dp := db.DayPart(time.Now().Hour())
+	defer e.persistTasteState(dp)
 	prev, err := e.Store.LatestProfile(dp)
 	if err != nil || len(prev) == 0 || len(trackVec) == 0 {
 		_ = e.Store.SaveProfile(dp, blob)
@@ -295,4 +391,70 @@ func (e *Engine) PersistTaste(trackVec []float32, signed, alpha float64) {
 	index.Normalize(v)
 	_ = e.Store.SaveProfile(dp, index.Float32Bytes(v))
 	_ = e.Store.PruneProfiles(dp, 50)
+}
+
+func (e *Engine) persistTasteState(daypart string) {
+	if e.TasteState == nil {
+		return
+	}
+	state := e.TasteState.Daypart(daypart)
+	if len(state.Vector) > 0 {
+		_ = e.Store.UpsertTasteState(db.TasteStateRow{
+			Key:            "daypart:" + daypart,
+			PositiveVector: index.Float32Bytes(state.Vector),
+			EmbeddingDim:   len(state.Vector), PositiveSamples: state.Samples,
+		})
+	}
+	negatives := e.TasteState.PersistentNegatives()
+	if len(negatives) > 0 {
+		payload, _ := json.Marshal(negatives)
+		_ = e.Store.UpsertTasteState(db.TasteStateRow{
+			Key: "persistent_negative", NegativeSamples: len(negatives),
+			NegativePrototypesJSON: string(payload),
+		})
+	}
+	e.rebuildTasteCentroids()
+}
+
+func (e *Engine) rebuildTasteCentroids() {
+	rows, err := e.Store.PositiveTasteSamples(400)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	samples := make([]taste.Sample, 0, len(rows))
+	for _, row := range rows {
+		indexRow, ok := e.Idx.RowOf(row.TrackID)
+		if !ok {
+			continue
+		}
+		samples = append(samples, taste.Sample{
+			TrackID: row.TrackID, Vector: e.Idx.Vector(indexRow),
+			Weight: row.Weight, At: row.At,
+		})
+	}
+	if len(samples) == 0 {
+		return
+	}
+	var warm []taste.Centroid
+	if stored, err := e.Store.LoadTasteCentroids(taste.CentroidAlgorithmVersion); err == nil {
+		for _, row := range stored {
+			warm = append(warm, taste.Centroid{
+				Vector:      index.BytesToFloat32(row.Vector),
+				Mass:        row.Mass,
+				SampleCount: row.SampleCount,
+			})
+		}
+	}
+	centroids := taste.WeightedSphericalCentroids(samples, taste.CentroidOptions{
+		WarmStart: warm, Seed: 1,
+	})
+	out := make([]db.TasteCentroidRow, 0, len(centroids))
+	for i, centroid := range centroids {
+		out = append(out, db.TasteCentroidRow{
+			Index: i, Vector: index.Float32Bytes(centroid.Vector),
+			EmbeddingDim: len(centroid.Vector), Mass: centroid.Mass,
+			SampleCount: centroid.SampleCount, AlgorithmVersion: taste.CentroidAlgorithmVersion,
+		})
+	}
+	_ = e.Store.ReplaceTasteCentroids(out)
 }

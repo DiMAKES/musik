@@ -35,15 +35,17 @@ from musik.listen import (
 from musik.scanner import scan_library
 from musik.worker import serve as serve_worker
 
-app = typer.Typer(add_completion=False, no_args_is_help=True, help="Умный локальный плеер (ТЗ 3.0)")
-playlist_app = typer.Typer(help="Шаг 4: генерация плейлистов (Daily/Radio/Weekly/Mood)")
-listen_app = typer.Typer(help="Шаг 5: история слушания / лайки / скипы")
+app = typer.Typer(add_completion=False, no_args_is_help=True, help="Локальный музыкальный сервер musik")
+playlist_app = typer.Typer(help="Генерация плейлистов (Daily/Radio/Weekly/Mood)")
+listen_app = typer.Typer(help="История слушания, лайки и скипы")
 jobs_app = typer.Typer(help="Фоновые задачи (очередь jobs)")
 discover_app = typer.Typer(help="Discover: подсказки альбомов")
+db_app = typer.Typer(help="Управление схемой SQLite")
 app.add_typer(playlist_app, name="playlist")
 app.add_typer(listen_app, name="listen")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(discover_app, name="discover")
+app.add_typer(db_app, name="db")
 console = Console()
 
 
@@ -66,13 +68,13 @@ def scan(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Шаг 1: сканировать библиотеку — теги, MD5, дедуп, LUFS/BPM/key."""
+    """Сканировать библиотеку: теги, MD5, дедуп, LUFS/BPM/key."""
     _setup_logging(verbose)
     settings = get_settings()
     lib = library or settings.library
     console.print(f"[bold]Library:[/bold] {lib}")
     console.print(
-        "[yellow]Без GPU полный CLAP-эмбеддинг (шаг 2) займёт часы на большой коллекции. "
+        "[yellow]Без GPU полный CLAP-эмбеддинг займёт часы на большой коллекции. "
         "Сейчас считаются только теги и точечные параметры.[/yellow]"
     )
     def _progress(p: dict) -> None:
@@ -115,7 +117,7 @@ def embed(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Шаг 2: CLAP-эмбеддинги — 30с начало + середина + конец, кеш по MD5."""
+    """Вычислить CLAP-эмбеддинги: начало + середина + конец, кеш по MD5."""
     _setup_logging(verbose)
     settings = get_settings()
     console.print(
@@ -191,7 +193,7 @@ def similar(
     k: int = typer.Option(10, "--k", "-k", help="Сколько соседей"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Шаг 3: найти похожие треки по CLAP cosine."""
+    """Найти похожие треки по CLAP cosine."""
     _setup_logging(verbose)
     ensure_db()
     track_id: int | None = None
@@ -250,7 +252,7 @@ def clusters(
     rebuild: bool = typer.Option(True, "--rebuild/--no-rebuild", help="Пересчитать k-means"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Шаг 3: кластеры по CLAP (k-means на cosine)."""
+    """Построить кластеры по CLAP (k-means на cosine)."""
     _setup_logging(verbose)
     ensure_db()
     if rebuild and show is None:
@@ -289,6 +291,87 @@ def init() -> None:
     settings.ensure_dirs()
     ensure_db()
     console.print(f"DB ready: {settings.db_path}")
+
+
+@db_app.command("migrate")
+def db_migrate(
+    path: Optional[Path] = typer.Option(None, "--path", help="Путь к SQLite (default MUSIK_DB_PATH)"),
+) -> None:
+    """Применить все пронумерованные миграции; повторный запуск безопасен."""
+    from musik.db.migrations import LATEST_SCHEMA_VERSION, migrate_db
+
+    db_path = path or get_settings().db_path
+    version = migrate_db(db_path)
+    console.print(f"DB schema ready: {db_path} (version {version}/{LATEST_SCHEMA_VERSION})")
+
+
+@db_app.command("rebuild-transitions")
+def db_rebuild_transitions(
+    path: Optional[Path] = typer.Option(None, "--path", help="Путь к SQLite"),
+) -> None:
+    """Пересобрать transition_stats из event log."""
+    import sqlite3
+
+    from musik.db.migrations import migrate_db
+
+    db_path = path or get_settings().db_path
+    migrate_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("DELETE FROM transition_stats")
+        rows = conn.execute(
+            """
+            SELECT track_id, action, COALESCE(reason,''), COALESCE(source,''), ts, COALESCE(session_id,'')
+            FROM listening_history
+            WHERE action IN ('track_end','skip','finish')
+            ORDER BY session_id, ts
+            """
+        ).fetchall()
+        prev: dict[str, int] = {}
+        n = 0
+        for row in rows:
+            session = row[5] or "_"
+            track_id = int(row[0])
+            action, reason = row[1], row[2]
+            if reason == "completed" or action == "finish":
+                outcome, delta = "finished", 1.0
+            elif action == "skip" or reason == "skipped":
+                outcome, delta = "early_skip", -0.1
+            else:
+                outcome, delta = "partial", 0.3
+            if row[3] == "manual":
+                delta *= 1.5
+            from_id = prev.get(session)
+            if from_id and from_id != track_id:
+                finished = 1 if outcome == "finished" else 0
+                partial = 1 if outcome == "partial" else 0
+                skip = 1 if outcome == "early_skip" else 0
+                manual = 1 if row[3] == "manual" else 0
+                radio = 1 - manual
+                conn.execute(
+                    """
+                    INSERT INTO transition_stats(
+                      from_id, to_id, manual_count, radio_count, finished_count,
+                      partial_count, skip_count, decayed_weight, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(from_id, to_id) DO UPDATE SET
+                      manual_count = manual_count + excluded.manual_count,
+                      radio_count = radio_count + excluded.radio_count,
+                      finished_count = finished_count + excluded.finished_count,
+                      partial_count = partial_count + excluded.partial_count,
+                      skip_count = skip_count + excluded.skip_count,
+                      decayed_weight = decayed_weight + excluded.decayed_weight,
+                      updated_at = excluded.updated_at
+                    """,
+                    (from_id, track_id, manual, radio, finished, partial, skip, delta, row[4]),
+                )
+                n += 1
+            prev[session] = track_id
+        conn.commit()
+        console.print(f"Rebuilt {n} transition edges")
+    finally:
+        conn.close()
 
 
 @app.command("lyrics")
@@ -395,12 +478,12 @@ def playlist_daily(
     ),
     save: bool = typer.Option(True, "--save/--no-save"),
 ) -> None:
-    """Daily Mix: вкус/центроид + MMR + дальние exploration-треки."""
+    """Daily Mix: общий линейный ранкер, квоты источников и MMR."""
     ensure_db()
     build = generate_daily(size=size, explore_ratio=explore)
     console.print(
-        f"center={build.meta.get('center')} near={build.meta.get('n_near')} "
-        f"far={build.meta.get('n_far')} explore={build.meta.get('explore_ratio')}"
+        f"center={build.meta.get('center')} method={build.meta.get('method')} "
+        f"explore={build.meta.get('explore_ratio')} tracks={len(build.entries)}"
     )
     if save:
         pid = build.persist()
@@ -417,7 +500,7 @@ def playlist_radio(
     explore: Optional[float] = typer.Option(None, "--explore", "-e", help="Вероятность прыжка вдаль"),
     save: bool = typer.Option(True, "--save/--no-save"),
 ) -> None:
-    """Radio: цепочка похожих + редкие прыжки к далёким трекам."""
+    """Radio: цепочка выборов того же ранкера от seed-трека."""
     ensure_db()
     seed_id = _resolve_track_arg(seed)
     build = generate_radio(seed_track_id=seed_id, size=size, explore_ratio=explore)
@@ -435,7 +518,7 @@ def playlist_weekly(
     explore: Optional[float] = typer.Option(None, "--explore", "-e"),
     save: bool = typer.Option(True, "--save/--no-save"),
 ) -> None:
-    """Weekly Mix: корзины по кластерам + far-хвост."""
+    """Weekly Mix: тот же ранкер с недельной ротацией seed."""
     ensure_db()
     build = generate_weekly(size=size, explore_ratio=explore)
     if save:
@@ -671,7 +754,7 @@ def watch_cmd(
 
 @jobs_app.command("enqueue")
 def jobs_enqueue(
-    kind: str = typer.Argument(..., help="scan|embed|clusters|daily|album_tips|full_rescan"),
+    kind: str = typer.Argument(..., help="scan|embed|clusters|daily|album_tips|full_rescan|mix_pack|train_ranker"),
     payload_json: Optional[str] = typer.Option(
         None, "--payload", "-p", help="JSON payload для задачи"
     ),

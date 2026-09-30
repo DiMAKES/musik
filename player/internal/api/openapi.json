@@ -57,6 +57,153 @@
           },
           "artwork": {
             "type": "string"
+          },
+          "impression_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "PlaybackEvent": {
+        "type": "object",
+        "required": [
+          "type",
+          "event_id",
+          "track_id",
+          "session_id"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "track_start",
+              "progress",
+              "track_end",
+              "skip",
+              "like",
+              "dislike"
+            ]
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable client-generated identity; retries reuse the same value."
+          },
+          "impression_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "description": "Required for new radio clients. Omission invokes the legacy unambiguous fallback."
+          },
+          "track_id": {
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "position_sec": {
+            "type": "number",
+            "minimum": 0
+          },
+          "duration_sec": {
+            "type": "number",
+            "minimum": 0
+          },
+          "listened_sec": {
+            "type": "number",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "skipped",
+              "next",
+              ""
+            ]
+          }
+        }
+      },
+      "Interval": {
+        "type": "object",
+        "properties": {
+          "low": { "type": "number" },
+          "high": { "type": "number" }
+        }
+      },
+      "MetricSlice": {
+        "type": "object",
+        "required": [
+          "dimension",
+          "value",
+          "impressions",
+          "played",
+          "finished",
+          "early_skips",
+          "sufficient_sample"
+        ],
+        "properties": {
+          "dimension": { "type": "string" },
+          "value": { "type": "string" },
+          "impressions": { "type": "integer" },
+          "played": { "type": "integer" },
+          "finished": { "type": "integer" },
+          "partial": { "type": "integer" },
+          "early_skips": { "type": "integer" },
+          "likes": { "type": "integer" },
+          "superseded": { "type": "integer" },
+          "abandoned": { "type": "integer" },
+          "unique_artists": { "type": "integer" },
+          "finish_rate": { "type": "number" },
+          "early_skip_rate": { "type": "number" },
+          "likes_per_100_played": { "type": "number" },
+          "artist_diversity": { "type": "number" },
+          "finish_interval_95": { "$ref": "#/components/schemas/Interval" },
+          "early_skip_interval_95": { "$ref": "#/components/schemas/Interval" },
+          "like_interval_95": { "$ref": "#/components/schemas/Interval" },
+          "sufficient_sample": { "type": "boolean" }
+        }
+      },
+      "BaselineStatus": {
+        "type": "object",
+        "required": [
+          "ready",
+          "observed_days",
+          "eligible_algorithmic_impressions",
+          "minimum_days",
+          "minimum_impressions"
+        ],
+        "properties": {
+          "ready": { "type": "boolean" },
+          "started_at": { "type": "string" },
+          "observed_days": { "type": "integer" },
+          "eligible_algorithmic_impressions": { "type": "integer" },
+          "minimum_days": { "type": "integer", "minimum": 14 },
+          "minimum_impressions": { "type": "integer", "minimum": 300 }
+        }
+      },
+      "RecommendationMetrics": {
+        "type": "object",
+        "required": ["window_days", "baseline", "overall", "breakdowns"],
+        "properties": {
+          "window_days": { "type": "integer" },
+          "baseline": { "$ref": "#/components/schemas/BaselineStatus" },
+          "overall": { "$ref": "#/components/schemas/MetricSlice" },
+          "breakdowns": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/MetricSlice" }
           }
         }
       }
@@ -309,9 +456,29 @@
     "/api/events": {
       "post": {
         "summary": "Playback events",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackEvent"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "ok / next"
+          },
+          "409": {
+            "description": "Legacy fallback matched more than one pending impression",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -529,17 +696,40 @@
         "summary": "Seven-day listening and recommendation outcomes",
         "responses": {
           "200": {
-            "description": "Listen, completion, diversity and explore/exploit rates"
+            "description": "Outcome, source, daypart, maturity and date slices plus baseline readiness",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecommendationMetrics"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/metrics/recommendations": {
       "get": {
-        "summary": "Recommendation latency and seven-day outcomes",
+        "summary": "Recommendation latency and 90-day outcome baseline",
         "responses": {
           "200": {
-            "description": "In-memory p50/p95/p99 latency plus persisted impression outcomes"
+            "description": "90-day outcomes, latency, last policy, training runs and explore/bandit state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "window": { "type": "string", "enum": ["90d"] },
+                    "outcomes": { "$ref": "#/components/schemas/RecommendationMetrics" },
+                    "latency_ms": { "type": "object" },
+                    "last_policy": { "type": "object" },
+                    "recent_requests": { "type": "array", "items": { "type": "object" } },
+                    "training_runs": { "type": "array", "items": { "type": "object" } },
+                    "explore": { "type": "object" }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -602,9 +792,34 @@
         }
       }
     },
+    "/api/profile/explore": {
+      "put": {
+        "summary": "Update explore bounds",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "explore_lo": { "type": "number" },
+                  "explore_hi": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Clamped explore bounds and bandit readiness"
+          }
+        }
+      }
+    },
     "/api/artwork/{id}": {
       "get": {
         "summary": "Track artwork",
+        "description": "JPEG thumbnails at 96, 256 or 640 px (other `w` values snap to nearest). Omit `w` to get 640. Pass `full=1` for the original embedded file.",
         "parameters": [
           {
             "name": "id",
@@ -613,11 +828,38 @@
             "schema": {
               "type": "integer"
             }
+          },
+          {
+            "name": "w",
+            "in": "query",
+            "required": false,
+            "description": "Target width; snapped to 96, 256, or 640. Default 640.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "full",
+            "in": "query",
+            "required": false,
+            "description": "If 1, serve the original artwork instead of a JPEG thumbnail.",
+            "schema": {
+              "type": "integer",
+              "enum": [1]
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Artwork image"
+            "description": "Artwork image (image/jpeg thumbnail, or original for full=1)",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, max-age=2592000 for thumbnails; 86400 for full=1"
+              }
+            }
           }
         }
       }
@@ -665,6 +907,16 @@
     "/api/session/jump": {
       "post": {
         "summary": "Jump within fixed session",
+        "responses": {
+          "200": {
+            "description": "Updated session position"
+          }
+        }
+      }
+    },
+    "/api/session/back": {
+      "post": {
+        "summary": "Return to the previous track",
         "responses": {
           "200": {
             "description": "Updated session position"
@@ -796,6 +1048,213 @@
             "description": "Job status"
           }
         }
+      }
+    },
+    "/api/contexts": {
+      "get": {
+        "summary": "List taste contexts",
+        "responses": { "200": { "description": "Contexts" } }
+      },
+      "post": {
+        "summary": "Create taste context",
+        "responses": { "200": { "description": "Created context" } }
+      }
+    },
+    "/api/contexts/{id}": {
+      "get": {
+        "summary": "Get taste context",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Context" } }
+      },
+      "patch": {
+        "summary": "Update taste context",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Updated context" } }
+      },
+      "delete": {
+        "summary": "Archive taste context",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Archived" } }
+      }
+    },
+    "/api/contexts/{id}/activate": {
+      "post": {
+        "summary": "Activate context on a session",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Active context ids" } }
+      }
+    },
+    "/api/contexts/{id}/deactivate": {
+      "post": {
+        "summary": "Deactivate context on a session",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Active context ids" } }
+      }
+    },
+    "/api/session/contexts": {
+      "post": {
+        "summary": "Replace active session contexts",
+        "responses": { "200": { "description": "Active context ids" } }
+      }
+    },
+    "/api/rules": {
+      "get": {
+        "summary": "List radio rules",
+        "responses": { "200": { "description": "Rules" } }
+      },
+      "post": {
+        "summary": "Create radio rule",
+        "responses": { "200": { "description": "Created rule" } }
+      }
+    },
+    "/api/rules/{id}": {
+      "patch": {
+        "summary": "Update radio rule",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Updated rule" } }
+      },
+      "delete": {
+        "summary": "Archive radio rule",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Archived" } }
+      }
+    },
+    "/api/rules/undo": {
+      "post": {
+        "summary": "Undo last archived radio rule",
+        "responses": { "200": { "description": "Restored rule" } }
+      }
+    },
+    "/api/playlists": {
+      "get": {
+        "summary": "List user and smart playlists",
+        "responses": { "200": { "description": "Playlists" } }
+      },
+      "post": {
+        "summary": "Create user or smart playlist",
+        "responses": { "200": { "description": "Created playlist" } }
+      }
+    },
+    "/api/playlists/import": {
+      "post": {
+        "summary": "Import M3U or JSON playlist",
+        "responses": { "200": { "description": "Imported playlist" } }
+      }
+    },
+    "/api/playlists/preview": {
+      "post": {
+        "summary": "Preview smart playlist rule",
+        "responses": { "200": { "description": "Matching tracks" } }
+      }
+    },
+    "/api/playlists/from-favorites": {
+      "post": {
+        "summary": "Copy favorites into a playlist",
+        "responses": { "200": { "description": "Created playlist" } }
+      }
+    },
+    "/api/playlists/from-later": {
+      "post": {
+        "summary": "Copy Listen Later into a playlist",
+        "responses": { "200": { "description": "Created playlist" } }
+      }
+    },
+    "/api/playlists/{id}": {
+      "get": {
+        "summary": "Get playlist",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Playlist" } }
+      },
+      "patch": {
+        "summary": "Update playlist",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Updated playlist" } }
+      },
+      "delete": {
+        "summary": "Archive or delete playlist",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Archived" } }
+      }
+    },
+    "/api/playlists/{id}/tracks": {
+      "post": {
+        "summary": "Add playlist track",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Added item" } }
+      }
+    },
+    "/api/playlists/{id}/tracks/{item_id}": {
+      "delete": {
+        "summary": "Remove playlist item",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } },
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Removed" } }
+      }
+    },
+    "/api/playlists/{id}/reorder": {
+      "post": {
+        "summary": "Reorder playlist items",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Updated playlist" } }
+      }
+    },
+    "/api/playlists/{id}/duplicate": {
+      "post": {
+        "summary": "Duplicate playlist",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Copied playlist" } }
+      }
+    },
+    "/api/playlists/{id}/from-queue": {
+      "post": {
+        "summary": "Append current queue to playlist",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Updated playlist" } }
+      }
+    },
+    "/api/playlists/{id}/play": {
+      "post": {
+        "summary": "Play playlist from a position",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Playback session" } }
+      }
+    },
+    "/api/playlists/{id}/radio": {
+      "post": {
+        "summary": "Start radio from playlist seed",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Radio session" } }
+      }
+    },
+    "/api/playlists/{id}/export": {
+      "get": {
+        "summary": "Export playlist as JSON or M3U",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Export body" } }
+      }
+    },
+    "/api/tags": {
+      "get": {
+        "summary": "List custom tags",
+        "responses": { "200": { "description": "Tags" } }
+      },
+      "post": {
+        "summary": "Create custom tag",
+        "responses": { "200": { "description": "Created tag" } }
+      }
+    },
+    "/api/tags/{id}/tracks": {
+      "post": {
+        "summary": "Tag a track",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Tagged" } }
+      },
+      "delete": {
+        "summary": "Remove tag from a track",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Removed" } }
       }
     },
     "/manifest.webmanifest": {

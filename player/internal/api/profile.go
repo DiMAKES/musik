@@ -27,22 +27,23 @@ func (s *Server) handleProfile(w http.ResponseWriter, _ *http.Request) {
 	if confidence > 1 {
 		confidence = 1
 	}
-	writeJSON(w, map[string]any{
-		"ready":            mat == taste.StatusReady,
-		"maturity":         mat,
-		"n_positive":       pos,
-		"n_negative":       neg,
-		"ready_at":         s.Cfg.ProfileReadyAt,
-		"forming_at":       s.Cfg.ProfileFormingAt,
-		"confidence":       confidence,
-		"explore_ratio":    explore,
-		"source":           s.Taste.SourceName(),
-		"taste_vector":     s.Taste.Ready(),
-		"top_artists":      artists,
-		"top_clusters":     clusters,
-		"online_authority": "go_ema",
-		"online_context":   "global",
-		"offline_context":  "offline_report",
-		"offline_note":     "Python writes only offline_report; Go owns global EMA",
-	})
+	out := map[string]any{
+		"ready":         mat == taste.StatusReady,
+		"maturity":      mat,
+		"n_positive":    pos,
+		"n_negative":    neg,
+		"ready_at":      s.Cfg.ProfileReadyAt,
+		"forming_at":    s.Cfg.ProfileFormingAt,
+		"confidence":    confidence,
+		"explore_ratio": explore,
+		"source":        s.Taste.SourceName(),
+		"taste_vector":  s.Taste.Ready(),
+		"top_artists":   artists,
+		"top_clusters":  clusters,
+		"model_version": s.Play.Ranker.ModelVersion,
+	}
+	for key, value := range s.exploreState() {
+		out[key] = value
+	}
+	writeJSON(w, out)
 }

@@ -1,5 +1,5 @@
 .PHONY: up down logs rescan mixes smoke player test test-python test-go test-flutter build \
-	dev-init dev-up dev-down dev-logs dev-player dev-worker dev-ps
+	dev-init dev-up dev-down dev-logs dev-player dev-worker dev-ps sim bench
 
 COMPOSE ?= docker compose
 DEV_COMPOSE ?= $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
@@ -77,3 +77,6 @@ smoke:
 bench:
 	@chmod +x scripts/bench_queue.sh
 	./scripts/bench_queue.sh
+
+sim:
+	python scripts/sim_listener.py

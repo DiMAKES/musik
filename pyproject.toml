@@ -1,7 +1,7 @@
 [project]
 name = "musik"
 version = "0.1.0"
-description = "Умный локальный плеер — рекомендательная система (ТЗ 3.0)"
+description = "Локальный музыкальный сервер с воспроизводимой рекомендательной системой"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"

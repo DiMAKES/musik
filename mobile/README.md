@@ -1,6 +1,9 @@
 # Flutter client (musik_app)
 
 План паритета с вебом: **[docs/MOBILE.md](../docs/MOBILE.md)** §B.
+Общий порядок развития backend и нового event/impression-контракта:
+**[docs/ROADMAP.md](../docs/ROADMAP.md)**. Новые recommendation lifecycle-поля
+не следует добавлять в клиент до их фиксации в OpenAPI.
 
 ## Сейчас (Phase 1–2)
 

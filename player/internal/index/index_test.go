@@ -72,6 +72,23 @@ func TestTopKUsesStableRowTieBreak(t *testing.T) {
 	}
 }
 
+func TestFusedSimsMatchesIndependentScans(t *testing.T) {
+	idx := testIndex(t)
+	queries := [][]float32{{1, 0}, {0, 1}, {-1, 0}}
+	got := idx.FusedSimsTo(queries...)
+	if len(got) != len(queries) {
+		t.Fatalf("query results=%d, want %d", len(got), len(queries))
+	}
+	for q, query := range queries {
+		want := idx.SimsTo(query)
+		for row := range want {
+			if got[q][row] != want[row] {
+				t.Fatalf("query %d row %d = %f, want %f", q, row, got[q][row], want[row])
+			}
+		}
+	}
+}
+
 func TestArtistAndAlbumIndexes(t *testing.T) {
 	idx := testIndex(t)
 	if got := idx.RowsForArtist(" artist a "); len(got) != 2 || got[0] != 0 || got[1] != 1 {

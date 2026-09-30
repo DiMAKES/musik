@@ -4,46 +4,18 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/torwin-job/musik/player/internal/testdb"
 )
 
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "musik-test.db")
-	bootstrap, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := []string{
-		`CREATE TABLE tracks (
-			id INTEGER PRIMARY KEY, path TEXT NOT NULL DEFAULT '',
-			title TEXT, artist TEXT, album TEXT, duration REAL,
-			is_active INTEGER NOT NULL DEFAULT 1,
-			is_duplicate_of INTEGER,
-			artwork_path TEXT
-		)`,
-		`CREATE TABLE listening_history (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL,
-			ts TEXT NOT NULL, source TEXT, action TEXT NOT NULL,
-			daypart TEXT, weekday INTEGER, position_sec REAL, duration_sec REAL
-		)`,
-		`CREATE TABLE playlists (
-			id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE playlist_tracks (
-			playlist_id INTEGER NOT NULL, position INTEGER NOT NULL,
-			track_id INTEGER NOT NULL, explanation TEXT
-		)`,
-	}
-	for _, statement := range schema {
-		if _, err := bootstrap.Exec(statement); err != nil {
-			_ = bootstrap.Close()
-			t.Fatalf("create test schema: %v", err)
-		}
-	}
-	if err := bootstrap.Close(); err != nil {
+	if err := testdb.Create(path); err != nil {
 		t.Fatal(err)
 	}
 	store, err := Open(path)
@@ -67,6 +39,29 @@ func TestMondayZeroWeekday(t *testing.T) {
 	for _, tt := range tests {
 		if got := mondayZeroWeekday(tt.day); got != tt.want {
 			t.Fatalf("mondayZeroWeekday(%s) = %d, want %d", tt.day, got, tt.want)
+		}
+	}
+}
+
+func TestOpenRequiresExactMigratedSchemaVersion(t *testing.T) {
+	for _, version := range []int{0, SupportedSchemaVersion + 1} {
+		path := filepath.Join(t.TempDir(), fmt.Sprintf("schema-%d.db", version))
+		conn, err := sql.Open("sqlite", "file:"+path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Open(path)
+		if err == nil {
+			t.Fatalf("Open accepted schema version %d", version)
+		}
+		if !strings.Contains(err.Error(), "musik db migrate") {
+			t.Fatalf("error %q does not explain how to migrate", err)
 		}
 	}
 }
@@ -190,20 +185,36 @@ func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.InsertRecommendationImpressions([]RecommendationImpression{
+	impressions := []RecommendationImpression{
 		{SessionID: "s1", TrackID: 1, Position: 0, Explore: true, Score: 0.2},
 		{SessionID: "s1", TrackID: 2, Position: 1, Explore: false, Score: 0.8},
-	}); err != nil {
+	}
+	if err := store.InsertRecommendationImpressions(impressions); err != nil {
 		t.Fatal(err)
 	}
 	duration := 100.0
 	skipped := 10.0
 	completed := 95.0
-	if _, err := store.InsertListen(1, "track_end", "test", "s1", "skipped", nil, &duration, &skipped); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.InsertListen(2, "track_end", "test", "s1", "completed", nil, &duration, &completed); err != nil {
-		t.Fatal(err)
+	for index, item := range impressions {
+		if _, err := store.ApplyLifecycleEvent(LifecycleEvent{
+			EventID: fmt.Sprintf("start-%d", index), Type: "track_start",
+			TrackID: item.TrackID, SessionID: "s1", ImpressionID: item.ImpressionID,
+			RequestID: item.RequestID, Source: item.Source,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		outcome, listened := "early_skip", skipped
+		if item.TrackID == 2 {
+			outcome, listened = "finished", completed
+		}
+		if _, err := store.ApplyLifecycleEvent(LifecycleEvent{
+			EventID: fmt.Sprintf("end-%d", index), Type: "track_end",
+			TrackID: item.TrackID, SessionID: "s1", ImpressionID: item.ImpressionID,
+			RequestID: item.RequestID, Source: item.Source, DurationSec: &duration,
+			ListenedSec: &listened, ListenedRatio: listened / duration, Outcome: outcome,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	metrics, err := store.WeeklyMetrics()
 	if err != nil {
@@ -219,5 +230,273 @@ func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
 	if metrics.ExploreSkipRate != 1 || metrics.ExploitCompRate != 1 {
 		t.Fatalf("rates explore skip=%f exploit complete=%f, want 1/1",
 			metrics.ExploreSkipRate, metrics.ExploitCompRate)
+	}
+}
+
+func TestLifecycleEventsAreIdempotent(t *testing.T) {
+	store, _ := openTestStore(t)
+	if _, err := store.DB.Exec(
+		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	requestID, impressionID := NewID(), NewID()
+	if err := store.CreateRecommendationRequest(RecommendationRequest{
+		RequestID: requestID, SessionID: "s1", Reason: "radio_start",
+		PolicyVersion: "test", CandidateCount: 1,
+	}, []RecommendationImpression{{
+		ImpressionID: impressionID, SessionID: "s1", TrackID: 1,
+		Source: "radio_start",
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	start := LifecycleEvent{
+		EventID: "start-1", Type: "track_start", TrackID: 1,
+		SessionID: "s1", ImpressionID: impressionID,
+		RequestID: requestID, Source: "radio_start",
+	}
+	first, err := store.ApplyLifecycleEvent(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := store.ApplyLifecycleEvent(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Inserted || !first.LifecycleChanged || retry.Inserted {
+		t.Fatalf("first=%+v retry=%+v", first, retry)
+	}
+	end := LifecycleEvent{
+		EventID: "end-1", Type: "track_end", TrackID: 1,
+		SessionID: "s1", ImpressionID: impressionID, RequestID: requestID,
+		Source: "radio_start", Outcome: "finished", ListenedRatio: 0.95,
+	}
+	if result, err := store.ApplyLifecycleEvent(end); err != nil || !result.LifecycleChanged {
+		t.Fatalf("end result=%+v err=%v", result, err)
+	}
+	end.EventID = "end-second-client-id"
+	if result, err := store.ApplyLifecycleEvent(end); err != nil || result.LifecycleChanged {
+		t.Fatalf("second close result=%+v err=%v", result, err)
+	}
+	var plays, finishes int
+	if err := store.DB.QueryRow(
+		`SELECT plays, finishes FROM track_stats WHERE track_id=1`,
+	).Scan(&plays, &finishes); err != nil {
+		t.Fatal(err)
+	}
+	if plays != 1 || finishes != 1 {
+		t.Fatalf("track stats plays/finishes=%d/%d, want 1/1", plays, finishes)
+	}
+}
+
+func TestLegacyFallbackRejectsAmbiguousPendingImpressions(t *testing.T) {
+	store, _ := openTestStore(t)
+	if _, err := store.DB.Exec(
+		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		requestID := NewID()
+		if err := store.CreateRecommendationRequest(RecommendationRequest{
+			RequestID: requestID, SessionID: "s1", Reason: "refill",
+			PolicyVersion: "test", CandidateCount: 1,
+		}, []RecommendationImpression{{
+			ImpressionID: NewID(), SessionID: "s1", TrackID: 1, Source: "exploit",
+		}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.ResolveImpression("", "s1", 1); err != ErrAmbiguousImpression {
+		t.Fatalf("fallback error=%v, want ErrAmbiguousImpression", err)
+	}
+}
+
+func TestBaselineStatusAndMetricBreakdowns(t *testing.T) {
+	store, _ := openTestStore(t)
+	if _, err := store.DB.Exec(
+		`INSERT INTO tracks(id, path, title, artist) VALUES (1, '/track.flac', 'Track', 'Artist')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	requestID := NewID()
+	if _, err := store.DB.Exec(`
+INSERT INTO recommendation_requests(
+  request_id, session_id, reason, policy_version, candidate_count, latency_ms, created_at
+) VALUES (?, 's1', 'refill', 'test', 300, 1, datetime('now','-15 days'))`,
+		requestID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < BaselineMinimumImpressions; i++ {
+		outcome := "finished"
+		if i%4 == 0 {
+			outcome = "early_skip"
+		}
+		queued := "datetime('now','-15 days')"
+		if i > 0 {
+			queued = "datetime('now')"
+		}
+		query := fmt.Sprintf(`
+INSERT INTO recommendation_impressions(
+  session_id, track_id, position, score, cosine_taste, cosine_current,
+  explore, new_boost, maturity, mode, shown_at, impression_id, request_id,
+  source, queued_at, played_at, closed_at, outcome, listened_ratio, legacy
+) VALUES (
+  's1', 1, ?, 0, 0, 0, 0, 0, 'ready', 'radio', %s, ?, ?,
+  'exploit', %s, %s, %s, ?, 0.9, 0
+)`, queued, queued, queued, queued)
+		if _, err := store.DB.Exec(query, i, NewID(), requestID, outcome); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metrics, err := store.OutcomeMetrics(30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metrics.Baseline.Ready ||
+		metrics.Baseline.EligibleImpressions != BaselineMinimumImpressions {
+		t.Fatalf("baseline=%+v", metrics.Baseline)
+	}
+	if metrics.Overall.Played != BaselineMinimumImpressions ||
+		metrics.Overall.Finished == 0 || metrics.Overall.EarlySkips == 0 {
+		t.Fatalf("overall=%+v", metrics.Overall)
+	}
+	seen := map[string]bool{}
+	for _, slice := range metrics.Breakdowns {
+		seen[slice.Dimension] = true
+	}
+	for _, dimension := range []string{"source", "daypart", "maturity", "date"} {
+		if !seen[dimension] {
+			t.Errorf("missing %s breakdown", dimension)
+		}
+	}
+	if metrics.Overall.FinishInterval.Low <= 0 || metrics.Overall.FinishInterval.High < metrics.Overall.FinishRate {
+		t.Fatalf("finish interval=%+v rate=%f", metrics.Overall.FinishInterval, metrics.Overall.FinishRate)
+	}
+}
+
+func TestMetricsExcludeLegacyManualAndShare(t *testing.T) {
+	store, _ := openTestStore(t)
+	if _, err := store.DB.Exec(
+		`INSERT INTO tracks(id, path, title, artist) VALUES (1, '/track.flac', 'Track', 'Artist')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	requestID := NewID()
+	if _, err := store.DB.Exec(`
+INSERT INTO recommendation_requests(
+  request_id, session_id, reason, policy_version, candidate_count, latency_ms, created_at
+) VALUES (?, 's1', 'refill', 'test', 3, 1, datetime('now'))`, requestID); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		source, mode, outcome string
+		legacy                int
+	}{
+		{"exploit", "radio", "finished", 0},
+		{"manual", "radio", "finished", 0},
+		{"exploit", "share", "finished", 0},
+		{"legacy", "radio", "finished", 1},
+	}
+	for i, row := range rows {
+		if _, err := store.DB.Exec(`
+INSERT INTO recommendation_impressions(
+  session_id, track_id, position, score, cosine_taste, cosine_current,
+  explore, new_boost, maturity, mode, shown_at, impression_id, request_id,
+  source, queued_at, played_at, closed_at, outcome, listened_ratio, legacy
+) VALUES (
+  's1', 1, ?, 0, 0, 0, 0, 0, 'ready', ?, datetime('now'), ?, ?,
+  ?, datetime('now'), datetime('now'), datetime('now'), ?, 0.9, ?
+)`, i, row.mode, NewID(), requestID, row.source, row.outcome, row.legacy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metrics, err := store.OutcomeMetrics(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.Overall.Played != 1 || metrics.Overall.Finished != 1 {
+		t.Fatalf("eligible metrics=%+v, want only the algorithmic radio play", metrics.Overall)
+	}
+}
+
+func TestLikeStatsAreIdempotentWithoutSameEventID(t *testing.T) {
+	store, _ := openTestStore(t)
+	if _, err := store.DB.Exec(
+		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	impressionID, requestID := NewID(), NewID()
+	if err := store.CreateRecommendationRequest(RecommendationRequest{
+		RequestID: requestID, SessionID: "s1", Reason: "radio_start",
+		PolicyVersion: "test", CandidateCount: 1,
+	}, []RecommendationImpression{{
+		ImpressionID: impressionID, SessionID: "s1", TrackID: 1, Source: "radio_start",
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	like := LifecycleEvent{
+		Type: "like", TrackID: 1, SessionID: "s1",
+		ImpressionID: impressionID, RequestID: requestID, Source: "radio_start",
+	}
+	like.EventID = "like-a"
+	if _, err := store.ApplyLifecycleEvent(like); err != nil {
+		t.Fatal(err)
+	}
+	like.EventID = "like-b"
+	if result, err := store.ApplyLifecycleEvent(like); err != nil || result.LifecycleChanged {
+		t.Fatalf("second like result=%+v err=%v", result, err)
+	}
+	var likes int
+	if err := store.DB.QueryRow(`SELECT likes FROM track_stats WHERE track_id=1`).Scan(&likes); err != nil {
+		t.Fatal(err)
+	}
+	if likes != 1 {
+		t.Fatalf("likes=%d, want 1", likes)
+	}
+}
+
+func TestLatestPoliciesAndTrainingRuns(t *testing.T) {
+	store, _ := openTestStore(t)
+	if _, err := store.DB.Exec(
+		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	requestID := NewID()
+	if err := store.CreateRecommendationRequest(RecommendationRequest{
+		RequestID: requestID, SessionID: "s1", Reason: "radio_start",
+		PolicyVersion: "queue-core-v1", ModelVersion: "default-v1",
+		CandidateCount: 3, LatencyMS: 12.5,
+		PolicyJSON: `{"reason":"static","explore_share":0.2}`,
+	}, []RecommendationImpression{{
+		ImpressionID: NewID(), SessionID: "s1", TrackID: 1, Source: "exploit",
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`
+INSERT INTO training_runs(
+  run_id, model_version, model_type, feature_schema_version, train_from, train_until,
+  positive_count, negative_count, metrics_schema_version, metrics_json, status, created_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		NewID(), "ranker-v2", "linear", 1, "2026-01-01", "2026-02-01",
+		12, 8, 1, `{"auc":0.71}`, "published",
+	); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := store.LatestRecommendationPolicies(3)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("policies=%v err=%v", policies, err)
+	}
+	if policies[0].PolicyVersion != "queue-core-v1" || policies[0].Policy["reason"] != "static" {
+		t.Fatalf("policy=%+v", policies[0])
+	}
+	runs, err := store.ListTrainingRuns(3)
+	if err != nil || len(runs) != 1 || runs[0].Status != "published" {
+		t.Fatalf("runs=%v err=%v", runs, err)
+	}
+	if runs[0].Metrics["auc"] != 0.71 {
+		t.Fatalf("metrics=%v", runs[0].Metrics)
 	}
 }

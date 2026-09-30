@@ -10,6 +10,19 @@ const WEEKDAY_RU = {
   weekday_sun: "вс",
 };
 
+function clientId() {
+  let id = localStorage.getItem("musik_client_id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("musik_client_id", id);
+  }
+  return id;
+}
+
+function deviceId() {
+  return navigator.userAgentData?.platform || navigator.platform || "web";
+}
+
 let sessionId = sessionStorage.getItem("musik_session") || null;
 let current = null;
 let playlist = [];
@@ -19,8 +32,12 @@ let listenedAccum = 0;
 let lastPos = 0;
 let library = [];
 let libTab = "tracks";
+let libSort = "artist";
+let plAddTab = "tracks";
+let plAddSort = "artist";
 let libTimer = null;
 let seeking = false;
+let playbackGen = 0;
 let toastTimer = null;
 let jobPollTimer = null;
 let backgroundJobsTimer = null;
@@ -30,6 +47,7 @@ const knownJobStatuses = new Map();
 let favoriteIds = new Set();
 let favoriteArtists = new Set();
 let favoriteAlbums = new Set(); // "artist\0album"
+let homeHydrated = false;
 const wiredShelves = new WeakSet();
 const shelfAnim = new WeakMap();
 
@@ -172,14 +190,17 @@ function setView(name) {
   });
   const el = document.getElementById("view-" + name);
   if (el) el.classList.add("active");
-  if (name === "home") {
+  if (name === "home" && !homeHydrated) {
     loadMixes().catch(console.error);
     loadHomeCatalog().catch(console.error);
   }
   if (name === "library") loadLibrary().catch(console.error);
+  if (name === "collections") loadPlaylists().catch(console.error);
   if (name === "profile") {
     loadProfile().catch(console.error);
     loadShares().catch(console.error);
+    loadContexts().catch(console.error);
+    loadRules().catch(console.error);
   }
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -410,16 +431,124 @@ function groupCatalog(tracks) {
     if (!al.cover && t.artwork) al.cover = t.artwork;
   }
   return {
-    artists: [...artists.values()].sort((x, y) => y.tracks - x.tracks || x.artist.localeCompare(y.artist, "ru")),
-    albums: [...albums.values()].sort((x, y) => y.tracks - x.tracks || x.album.localeCompare(y.album, "ru")),
+    artists: sortArtists([...artists.values()], "tracks"),
+    albums: sortAlbums([...albums.values()], "tracks"),
   };
+}
+
+function cmpText(a, b) {
+  return String(a || "").localeCompare(String(b || ""), "ru", { sensitivity: "base" });
+}
+
+function sortTracks(list, sort) {
+  const out = [...list];
+  out.sort((a, b) => {
+    if (sort === "title") return cmpText(a.title, b.title) || cmpText(a.artist, b.artist);
+    if (sort === "album") return cmpText(a.album, b.album) || cmpText(a.artist, b.artist) || cmpText(a.title, b.title);
+    return cmpText(a.artist, b.artist) || cmpText(a.album, b.album) || cmpText(a.title, b.title);
+  });
+  return out;
+}
+
+function sortArtists(list, sort) {
+  const out = [...list];
+  out.sort((a, b) => {
+    if (sort === "tracks") return (b.tracks || 0) - (a.tracks || 0) || cmpText(a.artist, b.artist);
+    return cmpText(a.artist, b.artist);
+  });
+  return out;
+}
+
+function sortAlbums(list, sort) {
+  const out = [...list];
+  out.sort((a, b) => {
+    if (sort === "tracks") return (b.tracks || 0) - (a.tracks || 0) || cmpText(a.album, b.album);
+    if (sort === "artist") return cmpText(a.artist, b.artist) || cmpText(a.album, b.album);
+    return cmpText(a.album, b.album) || cmpText(a.artist, b.artist);
+  });
+  return out;
+}
+
+function catalogSortOptions(tab) {
+  if (tab === "artists") {
+    return [
+      ["name", "по имени"],
+      ["tracks", "у кого больше песен"],
+    ];
+  }
+  if (tab === "albums") {
+    return [
+      ["album", "по альбому"],
+      ["artist", "по артисту"],
+      ["tracks", "по числу песен"],
+    ];
+  }
+  return [
+    ["artist", "по артисту"],
+    ["title", "по песне"],
+    ["album", "по альбому"],
+  ];
+}
+
+function fillSortSelect(el, tab, current) {
+  if (!el) return current;
+  const opts = catalogSortOptions(tab);
+  const allowed = new Set(opts.map((o) => o[0]));
+  const value = allowed.has(current) ? current : opts[0][0];
+  el.innerHTML = opts.map(([v, label]) => `<option value="${v}">${label}</option>`).join("");
+  el.value = value;
+  return value;
+}
+
+function tracksOfArtist(artist) {
+  const name = (artist || "Unknown").trim() || "Unknown";
+  return library.filter((t) => ((t.artist || "Unknown").trim() || "Unknown") === name);
+}
+
+function tracksOfAlbum(artist, album) {
+  const a = (artist || "").trim();
+  const al = (album || "").trim();
+  return library.filter((t) => (t.artist || "").trim() === a && (t.album || "").trim() === al);
+}
+
+function coverImgHTML(src, width = 256, height = 256) {
+  if (!src) return "";
+  return `<img src="${escapeHtml(src)}" alt="" width="${width}" height="${height}" loading="lazy" decoding="async" onerror="this.remove()">`;
 }
 
 function entityCoverHtml(cover, letter, round) {
   if (cover) {
-    return `<div class="entity-art${round ? " round" : ""}" style="background-image:url('${cover}')"></div>`;
+    return `<div class="entity-art${round ? " round" : ""}">${coverImgHTML(thumbURL(cover, 256))}</div>`;
   }
   return `<div class="letter">${escapeHtml((letter || "♪").slice(0, 1).toUpperCase())}</div>`;
+}
+
+function tileArtHTML(cover, letter) {
+  if (cover) {
+    return `<div class="tile-art">${coverImgHTML(thumbURL(cover, 256))}</div>`;
+  }
+  return `<div class="letter">${escapeHtml((letter || "♪").slice(0, 1))}</div>`;
+}
+
+function setCoverImg(img, src, host) {
+  if (!img) return;
+  if (!src) {
+    img.removeAttribute("src");
+    host?.classList.remove("has-art");
+    return;
+  }
+  const show = () => host?.classList.add("has-art");
+  img.onload = show;
+  img.onerror = () => {
+    img.removeAttribute("src");
+    host?.classList.remove("has-art");
+  };
+  if (img.getAttribute("src") === src) {
+    if (img.complete && img.naturalWidth) show();
+    return;
+  }
+  host?.classList.remove("has-art");
+  img.src = src;
 }
 
 function renderMaturity(m) {
@@ -442,10 +571,13 @@ function setRatingUI(rating) {
   if (current?.id) setFavoriteUI(favoriteIds.has(current.id));
 }
 
+const PLAY_ICON = `<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg>`;
+const PAUSE_ICON = `<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6.8 5.5h3.4v13H6.8zm7 0h3.4v13h-3.4z"/></svg>`;
+
 function setPlayIcon(playing) {
-  const icon = playing ? "❚❚" : "▶";
-  $("btn-play").textContent = icon;
-  $("mini-play").textContent = icon;
+  const icon = playing ? PAUSE_ICON : PLAY_ICON;
+  $("btn-play").innerHTML = icon;
+  $("mini-play").innerHTML = icon;
 }
 
 function updateMini(track) {
@@ -457,8 +589,7 @@ function updateMini(track) {
   mini.hidden = false;
   $("mini-title").textContent = track.title || "—";
   $("mini-artist").textContent = track.artist || "";
-  const art = $("mini-art");
-  art.style.backgroundImage = track.artwork ? `url(${track.artwork})` : "";
+  setCoverImg($("mini-art-img"), track.artwork ? thumbURL(track.artwork, 96) : "", $("mini-art"));
 }
 
 function applyPlayPayload(data, { autoplay = true } = {}) {
@@ -486,6 +617,7 @@ function applyPlayPayload(data, { autoplay = true } = {}) {
       updateMini(data.current);
       $("title").textContent = data.current.title || "—";
       $("artist").textContent = [data.current.artist, data.current.album].filter(Boolean).join(" · ");
+      setNowSource(data.current.source);
     }
   }
 }
@@ -497,26 +629,28 @@ function renderNow(track) {
     $("title").textContent = "Выбери микс";
     $("artist").textContent = "или трек в библиотеке";
     art.classList.remove("has-art");
-    art.style.backgroundImage = "";
+    setCoverImg($("art-img"), "", art);
+    setNowSource("");
     updateMini(null);
     setPlayIcon(false);
     return;
   }
   $("title").textContent = track.title || "#" + track.id;
   $("artist").textContent = [track.artist, track.album].filter(Boolean).join(" · ");
+  setNowSource(track.source);
+  $("art-fallback").textContent = (track.title || "♪").slice(0, 1).toUpperCase();
   if (track.artwork) {
-    art.style.backgroundImage = `url(${track.artwork})`;
-    art.classList.add("has-art");
+    setCoverImg($("art-img"), thumbURL(track.artwork, 640), art);
   } else {
-    art.style.backgroundImage = "";
-    art.classList.remove("has-art");
-    $("art-fallback").textContent = (track.title || "♪").slice(0, 1).toUpperCase();
+    setCoverImg($("art-img"), "", art);
   }
   updateMini(track);
   const audio = $("audio");
   const url = track.stream || `/api/stream/${track.id}`;
   if (audio.dataset.trackId !== String(track.id)) {
+    const gen = bumpPlayback();
     audio.dataset.trackId = String(track.id);
+    audio.dataset.gen = String(gen);
     audio.src = url;
     audio.play().then(() => setPlayIcon(true)).catch(() => setPlayIcon(false));
     listenedAccum = 0;
@@ -557,18 +691,54 @@ async function loadLyrics(trackId) {
   }
 }
 
+function bumpPlayback() {
+  playbackGen += 1;
+  return playbackGen;
+}
+
+function trackArtURL(t) {
+  if (t?.artwork) return thumbURL(t.artwork, 96);
+  const id = t?.id || t?.track_id;
+  return id ? `/api/artwork/${id}?w=96` : "";
+}
+
+function queueRowHTML(t, i, { why = false, now = false } = {}) {
+  const id = t.id || t.track_id;
+  const art = trackArtURL(t);
+  const letter = escapeHtml((t.title || t.artist || "?").slice(0, 1).toUpperCase());
+  const reason = why ? whyLabel(t) : "";
+  return `
+    <span class="q-art" data-letter="${letter}">${
+      art ? `<img src="${escapeHtml(art)}" alt="" width="96" height="96" loading="lazy" decoding="async" onerror="this.remove()">` : ""
+    }</span>
+    <span class="q-body">
+      <strong>${escapeHtml(t.title || "#" + id)}</strong>
+      <span class="meta">
+        ${escapeHtml(t.artist || "")}
+        ${reason ? `<em class="q-why">${escapeHtml(reason)}</em>` : ""}
+      </span>
+    </span>
+    <span class="dur">${fmtTime(t.duration || 0)}</span>
+    <span class="pos">${now ? "▶" : i + 1}</span>`;
+}
+
 function renderQueue(queue) {
   const ol = $("queue");
   ol.innerHTML = "";
   const list = queue || [];
-  $("playlist-label").textContent = "далее в радио";
+  $("playlist-label").textContent = "Дальше в радио";
+  setQueueHint("Нажми песню — сразу она");
   $("queue-count").textContent = list.length ? `${list.length}` : "";
-  list.forEach((q) => {
+  list.forEach((q, i) => {
+    const id = q.track_id || q.id;
     const li = document.createElement("li");
-    const tags = [];
-    if (q.explore) tags.push('<span class="tag">far</span>');
-    if (q.new_boost) tags.push('<span class="tag">new</span>');
-    li.innerHTML = `<strong>${escapeHtml(q.artist || "")}</strong> — ${escapeHtml(q.title || "")}${tags.join("")}<span class="why">${escapeHtml(q.explanation || "")}</span>`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "playlist-item";
+    if (id) btn.dataset.trackId = String(id);
+    btn.innerHTML = queueRowHTML(q, i, { why: true });
+    bindTrackButton(btn, () => jumpTo(id, i).catch((e) => toast(e.message || String(e))));
+    li.appendChild(btn);
     ol.appendChild(li);
   });
 }
@@ -577,43 +747,34 @@ function renderPlaylist(tracks, currentIndex) {
   const ol = $("playlist");
   ol.innerHTML = "";
   const list = tracks || [];
-  $("playlist-label").textContent = "треки плейлиста";
+  $("playlist-label").textContent = "В этом списке";
+  setQueueHint("Нажми песню — сразу она");
   $("queue-count").textContent = list.length ? `${list.length}` : "";
   list.forEach((t, i) => {
     const id = t.id || t.track_id;
     const li = document.createElement("li");
     const btn = document.createElement("button");
+    const now = !!(t.current || i === currentIndex || (current && id === current.id));
     btn.type = "button";
     btn.className = "playlist-item";
-    if (t.current || i === currentIndex || (current && id === current.id)) {
-      btn.classList.add("current");
-    }
-    btn.innerHTML = `
-      <span class="pos">${i + 1}</span>
-      <span>
-        <strong>${escapeHtml(t.title || "#" + id)}</strong>
-        <span class="meta">${escapeHtml(t.artist || "")}${t.album ? " · " + escapeHtml(t.album) : ""}</span>
-      </span>
-      <span class="dur">${fmtTime(t.duration || 0)}</span>`;
-    btn.onclick = () => jumpTo(id, i).catch((e) => toast(e.message || String(e)));
+    if (id) btn.dataset.trackId = String(id);
+    if (now) btn.classList.add("current");
+    btn.innerHTML = queueRowHTML(t, i, { now });
+    bindTrackButton(btn, () => jumpTo(id, t.position ?? i).catch((e) => toast(e.message || String(e))));
     li.appendChild(btn);
     ol.appendChild(li);
   });
-  const cur = ol.querySelector(".playlist-item.current");
-  if (cur) cur.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 function highlightPlaylist(trackId) {
   const ol = $("playlist");
   if (!ol || ol.hidden) return;
-  ol.querySelectorAll(".playlist-item").forEach((btn) => {
-    const pos = Number(btn.querySelector(".pos")?.textContent || 0) - 1;
-    const t = playlist[pos];
-    const id = t?.id || t?.track_id;
-    btn.classList.toggle("current", id === trackId);
+  ol.querySelectorAll(".playlist-item").forEach((btn, i) => {
+    const on = Number(btn.dataset.trackId) === trackId;
+    btn.classList.toggle("current", on);
+    const pos = btn.querySelector(".pos");
+    if (pos) pos.textContent = on ? "▶" : String(i + 1);
   });
-  const cur = ol.querySelector(".playlist-item.current");
-  if (cur) cur.scrollIntoView({ block: "nearest" });
 }
 
 async function postEvent(type, extra = {}) {
@@ -621,11 +782,16 @@ async function postEvent(type, extra = {}) {
     toast("Сначала запусти микс или трек");
     throw new Error("no session");
   }
+  const startedGen = playbackGen;
   const audio = $("audio");
   const body = {
     type,
+    event_id: extra.event_id || crypto.randomUUID(),
     track_id: current?.id,
     session_id: sessionId,
+    impression_id: extra.impression_id || current?.impression_id,
+    client_id: clientId(),
+    device_id: deviceId(),
     position_sec: audio.currentTime || 0,
     duration_sec: audio.duration || current?.duration || 0,
     listened_sec: listenedAccum,
@@ -635,15 +801,21 @@ async function postEvent(type, extra = {}) {
   if (data.session_id) setSession(data.session_id);
   if (data.maturity) renderMaturity(data.maturity);
   if (data.name) $("mode-label").textContent = data.name;
-  if (Array.isArray(data.tracks)) {
-    playlist = data.tracks;
-    renderPlaylist(playlist, data.index);
-    $("queue").hidden = true;
-    $("playlist").hidden = false;
-  } else if (data.queue) {
-    renderQueue(data.queue);
+  const refreshList = type === "skip" || type === "track_end" || type === "like" || type === "dislike";
+  if (refreshList) {
+    if (Array.isArray(data.tracks)) {
+      playlist = data.tracks;
+      renderPlaylist(playlist, data.index);
+      $("queue").hidden = true;
+      $("playlist").hidden = false;
+    } else if (data.queue) {
+      renderQueue(data.queue);
+      $("playlist").hidden = true;
+      $("queue").hidden = false;
+    }
   }
   if (data.next) {
+    if (startedGen !== playbackGen) return data;
     renderNow(data.next);
     setRatingUI(null);
   } else if (data.ended) {
@@ -694,12 +866,33 @@ async function playMix(kind, cardEl, opts = {}) {
   }
 }
 
+function bindTrackButton(btn, onClick) {
+  let startY = 0;
+  let moved = false;
+  btn.addEventListener("pointerdown", (e) => {
+    startY = e.clientY;
+    moved = false;
+  });
+  btn.addEventListener("pointermove", (e) => {
+    if (Math.abs(e.clientY - startY) > 8) moved = true;
+  });
+  btn.addEventListener("click", (e) => {
+    if (moved) {
+      e.preventDefault();
+      return;
+    }
+    onClick();
+  });
+}
+
 async function jumpTo(trackId, index) {
   if (!sessionId) throw new Error("no session");
-  if (current && trackId === current.id) {
-    togglePlay();
+  if (current && Number(trackId) === Number(current.id)) {
     return;
   }
+  bumpPlayback();
+  const audio = $("audio");
+  audio.pause();
   const data = await api("/api/session/jump", {
     method: "POST",
     body: JSON.stringify({
@@ -713,9 +906,16 @@ async function jumpTo(trackId, index) {
   applyPlayPayload(data);
 }
 
+function thumbURL(url, width = 256) {
+  if (!url) return "";
+  const u = String(url);
+  if (/[?&]w=/.test(u)) return u;
+  return u.includes("?") ? `${u}&w=${width}` : `${u}?w=${width}`;
+}
+
 function coverStyle(m) {
   if (m.cover_track_id) {
-    return `<div class="cover-photo" style="background-image:url('/api/artwork/${m.cover_track_id}')"></div>`;
+    return `<div class="cover-photo">${coverImgHTML(`/api/artwork/${m.cover_track_id}?w=256`)}</div>`;
   }
   const blobs = ["blob-a", "blob-b", "blob-c", "blob-d"];
   const b = blobs[(m.kind || "").length % blobs.length];
@@ -1003,15 +1203,21 @@ async function loadSimilarRecs() {
 }
 
 async function loadHomeCatalog() {
-  await loadFavorites();
-  const tracks = await ensureLibrary();
-  const { artists, albums } = groupCatalog(tracks);
-  renderEntityShelf($("home-artists"), artists.slice(0, 28), "artist");
-  renderEntityShelf($("home-albums"), albums.slice(0, 28), "album");
-  renderEntityShelf($("home-tracks"), tracks.slice(0, 36), "track");
-  await loadHomeFavorites();
-  await loadSimilarRecs().catch(console.error);
+  const favsP = loadFavorites();
+  const [artistsRes, albumsRes, tracks] = await Promise.all([
+    api("/api/artists?limit=28"),
+    api("/api/albums?limit=28"),
+    api("/api/library?limit=36"),
+  ]);
+  await favsP;
+  renderEntityShelf($("home-artists"), artistsRes.artists || [], "artist");
+  renderEntityShelf($("home-albums"), albumsRes.albums || [], "album");
+  renderEntityShelf($("home-tracks"), Array.isArray(tracks) ? tracks : [], "track");
+  homeHydrated = true;
   wireAllShelves();
+  loadHomeFavorites().catch(console.error);
+  loadSimilarRecs().catch(console.error);
+  ensureLibrary().catch(console.error);
 }
 
 async function showTips(kind) {
@@ -1047,7 +1253,7 @@ async function showTips(kind) {
 
 function setLibTab(tab) {
   libTab = tab;
-  document.querySelectorAll(".seg-btn").forEach((b) => {
+  document.querySelectorAll("#view-library .seg-btn").forEach((b) => {
     const active = b.dataset.lib === tab;
     b.classList.toggle("active", active);
     b.setAttribute("aria-selected", String(active));
@@ -1063,6 +1269,7 @@ function setLibTab(tab) {
             ? "Поиск в избранном…"
             : "Артист, трек, альбом…";
   }
+  libSort = fillSortSelect($("lib-sort"), tab, libSort);
   renderLib(ph?.value || "");
 }
 
@@ -1096,8 +1303,10 @@ function renderLib(q) {
       ul.innerHTML = '<li class="sub" style="padding:.8rem 0">Избранное пусто — жми ♥ в плеере</li>';
       return;
     }
-    source
-      .filter((t) => !qq || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(qq))
+    sortTracks(
+      source.filter((t) => !qq || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(qq)),
+      libSort
+    )
       .slice(0, 400)
       .forEach((t) => {
         const li = document.createElement("li");
@@ -1112,6 +1321,7 @@ function renderLib(q) {
             <button type="button" class="tiny" data-act="album">Альбом</button>
             <button type="button" class="tiny" data-act="artist">Артист</button>
             <button type="button" class="tiny" data-act="later">Потом</button>
+            <button type="button" class="tiny" data-act="playlist">Плейлист</button>
             <button type="button" class="tiny" data-act="radio">Радио</button>
           </span>`;
         li.querySelector(".linkish").onclick = () =>
@@ -1134,6 +1344,8 @@ function renderLib(q) {
               } else if (act === "later") {
                 await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: t.id }) });
                 toast("В «Потом»");
+              } else if (act === "playlist") {
+                await pickPlaylistForTrack(t.id);
               } else if (act === "radio") {
                 await startRadio(t.id);
               }
@@ -1154,55 +1366,288 @@ function renderLib(q) {
   const { artists, albums } = groupCatalog(library);
 
   if (libTab === "artists") {
-    artists
-      .filter((a) => !qq || a.artist.toLowerCase().includes(qq))
-      .forEach((a) => {
+    sortArtists(
+      artists.filter((a) => !qq || a.artist.toLowerCase().includes(qq)),
+      libSort
+    ).forEach((a) => {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "lib-tile artist";
         btn.innerHTML = `
-          ${a.cover ? `<div class="tile-art" style="background-image:url('${a.cover}')"></div>` : `<div class="letter">${escapeHtml(a.artist.slice(0, 1))}</div>`}
+          ${tileArtHTML(a.cover, a.artist)}
           <strong>${escapeHtml(a.artist)}</strong>
           <span>${a.tracks} треков</span>
-          <div class="mix-meta">слушать</div>`;
-        btn.onclick = () =>
-          playFixed({ artist: a.artist }).catch((e) => toast(e.message || String(e)));
+          <div class="mix-meta">
+            слушать
+            <span class="tiny tile-pl" data-act="playlist">в плейлист</span>
+          </div>`;
+        btn.onclick = (e) => {
+          if (e.target.closest("[data-act=playlist]")) {
+            e.preventDefault();
+            pickPlaylistForTracks(tracksOfArtist(a.artist).map((t) => t.id)).catch((err) =>
+              toast(err.message || String(err))
+            );
+            return;
+          }
+          playFixed({ artist: a.artist }).catch((err) => toast(err.message || String(err)));
+        };
         grid.appendChild(btn);
       });
     return;
   }
 
-  albums
-    .filter((al) => !qq || `${al.artist} ${al.album}`.toLowerCase().includes(qq))
-    .forEach((al) => {
+  sortAlbums(
+    albums.filter((al) => !qq || `${al.artist} ${al.album}`.toLowerCase().includes(qq)),
+    libSort
+  ).forEach((al) => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "lib-tile";
       btn.innerHTML = `
-        ${al.cover ? `<div class="tile-art" style="background-image:url('${al.cover}')"></div>` : `<div class="letter">${escapeHtml(al.album.slice(0, 1))}</div>`}
+        ${tileArtHTML(al.cover, al.album)}
         <strong>${escapeHtml(al.album)}</strong>
         <span>${escapeHtml(al.artist)}</span>
-        <div class="mix-meta">${al.tracks} треков</div>`;
-      btn.onclick = () =>
-        playFixed({ artist: al.artist, album: al.album }).catch((e) => toast(e.message || String(e)));
+        <div class="mix-meta">
+          ${al.tracks} треков
+          <span class="tiny tile-pl" data-act="playlist">в плейлист</span>
+        </div>`;
+      btn.onclick = (e) => {
+        if (e.target.closest("[data-act=playlist]")) {
+          e.preventDefault();
+          pickPlaylistForTracks(tracksOfAlbum(al.artist, al.album).map((t) => t.id)).catch((err) =>
+            toast(err.message || String(err))
+          );
+          return;
+        }
+        playFixed({ artist: al.artist, album: al.album }).catch((err) => toast(err.message || String(err)));
+      };
       grid.appendChild(btn);
     });
 }
 
+const SOURCE_LABELS = {
+  exploit: "похоже на тебя",
+  transition: "часто после этой",
+  explore_adjacent: "чуть в сторону",
+  resurface: "давно не звучало",
+  new_in_library: "новое в библиотеке",
+  wildcard: "для разнообразия",
+  explore: "чуть в сторону",
+  radio_start: "старт радио",
+  refill: "добор очереди",
+  manual: "ты выбрал",
+};
+
+function sourceLabel(source) {
+  if (source === "aggregate") return "общая доля";
+  return SOURCE_LABELS[source] || source || "—";
+}
+
+function whyLabel(item) {
+  const reason = sourceLabel(item?.source);
+  if (item?.new_boost && item.source !== "new_in_library") {
+    return `${reason} · свежее`;
+  }
+  return reason;
+}
+
+function setQueueHint(text) {
+  const el = $("queue-hint");
+  if (el) el.textContent = text;
+}
+
+function setNowSource(source) {
+  const sourceEl = $("now-source");
+  if (!sourceEl) return;
+  if (source) {
+    sourceEl.hidden = false;
+    sourceEl.className = `tag source-${source}`;
+    sourceEl.textContent = sourceLabel(source);
+    return;
+  }
+  sourceEl.hidden = true;
+  sourceEl.textContent = "";
+  sourceEl.className = "tag";
+}
+
+function pct(value) {
+  return `${Math.round((Number(value) || 0) * 100)}%`;
+}
+
 async function loadProfile() {
-  const [p, m] = await Promise.all([api("/api/profile"), api("/api/metrics/weekly")]);
+  const [p, week, rec] = await Promise.all([
+    api("/api/profile"),
+    api("/api/metrics/weekly"),
+    api("/api/metrics/recommendations"),
+  ]);
   renderMaturity(p.maturity);
-  const conf = Math.round((p.confidence || 0) * 100);
-  $("profile-box").innerHTML = `
-    <div><strong>${escapeHtml(p.maturity)}</strong> · уверенность ${conf}%</div>
-    <div class="profile-detail">${p.n_positive}/${p.ready_at} позитивных сигналов · explore ${Number(p.explore_ratio).toFixed(2)}</div>
-    <div class="profile-artists"><strong>Топ артисты</strong><br>${
-      (p.top_artists || []).map((a) => `${escapeHtml(a.artist)} · ${a.count}`).join("<br>") || "—"
-    }</div>`;
-  $("metrics-box").innerHTML = `
-    <strong>Неделя</strong><br>
-    ${m.listens_7d} прослушиваний · ${m.skips_7d} скипов (${Math.round(m.skip_rate_7d * 100)}%) · ${m.unique_artists_7d} артистов`;
+  renderTasteCard(p);
+  renderMonitor(p, week, rec);
+  bindExploreBounds();
   loadShares().catch(console.error);
+}
+
+function renderTasteCard(p) {
+  const readyAt = Math.max(1, p.ready_at || 8);
+  const likes = p.n_positive || 0;
+  const skips = p.n_negative || 0;
+  const progress = Math.min(100, Math.round((likes / readyAt) * 100));
+  const status = tasteStatus(p.maturity);
+  const artists = (p.top_artists || []).map((a) =>
+    `<span class="artist-chip">${escapeHtml(a.artist)}</span>`
+  ).join("") || `<span class="profile-detail">Появятся после нескольких прослушиваний</span>`;
+  $("profile-box").innerHTML = `
+    <div class="panel-kicker">вкус</div>
+    <div class="monitor-title">
+      <strong>${escapeHtml(status.title)}</strong>
+      <span class="chip ${p.maturity === "ready" ? "on" : ""}">${escapeHtml(status.chip)}</span>
+    </div>
+    <p class="profile-lead">${escapeHtml(status.lead)}</p>
+    <div class="taste-meter" aria-hidden="true"><i style="width:${progress}%"></i></div>
+    <div class="stat-grid">
+      <div class="stat"><b>${likes}</b><span>лайков</span></div>
+      <div class="stat"><b>${skips}</b><span>скипов</span></div>
+      <div class="stat"><b>${pct(p.explore_ratio)}</b><span>нового сейчас</span></div>
+    </div>
+    <div class="explore-bounds">
+      <strong>Сколько нового в радио</strong>
+      <p class="profile-detail">Знакомое — похожее на лайки. Новое — соседнее, забытое и случайное.</p>
+      <label class="bound-row">
+        <span class="bound-name">не меньше</span>
+        <input class="slider" id="explore-lo" type="range" min="0" max="0.6" step="0.05" value="${Number(p.explore_lo ?? 0.1)}">
+        <span class="bound-val" id="explore-lo-val"></span>
+      </label>
+      <label class="bound-row">
+        <span class="bound-name">не больше</span>
+        <input class="slider" id="explore-hi" type="range" min="0.1" max="0.8" step="0.05" value="${Number(p.explore_hi ?? 0.4)}">
+        <span class="bound-val" id="explore-hi-val"></span>
+      </label>
+      <div class="profile-detail" id="explore-bounds-label"></div>
+      <button type="button" class="btn" id="btn-explore-save">Сохранить</button>
+    </div>
+    <div class="profile-artists">
+      <strong>Часто играет</strong>
+      <div class="artist-row">${artists}</div>
+    </div>`;
+}
+
+function tasteStatus(value) {
+  return {
+    discovering: {
+      title: "Радио ещё знакомится",
+      chip: "начало",
+      lead: "Слушай и скипай — так оно запоминает, что тебе заходит.",
+    },
+    forming: {
+      title: "Вкус уже проявляется",
+      chip: "учится",
+      lead: "Ещё несколько лайков — и подбор станет увереннее.",
+    },
+    ready: {
+      title: "Радио знает твой вкус",
+      chip: "готово",
+      lead: "Дальше оно опирается на лайки и то, что ты дослушиваешь.",
+    },
+  }[value] || { title: "Твой вкус", chip: "—", lead: "" };
+}
+
+function maturityLabel(value) {
+  return tasteStatus(value).title;
+}
+
+function renderMonitor(p, week, rec) {
+  const outcomes = rec.outcomes || week || {};
+  const overall = outcomes.overall || {};
+  const explore = rec.explore || p;
+  const policy = rec.last_policy || {};
+  const decision = policy.policy || {};
+  const sources = (outcomes.breakdowns || []).filter((row) => row.dimension === "source");
+  const sourceRows = sources.length
+    ? sources.map((row) => {
+        const finish = Math.round((row.finish_rate || 0) * 100);
+        const skip = Math.round((row.early_skip_rate || 0) * 100);
+        return `<div class="source-row">
+          <div class="source-head">
+            <span class="tag source-${escapeHtml(row.value)}">${escapeHtml(sourceLabel(row.value))}</span>
+            <span>${row.played} треков · ${finish}% дослушано</span>
+          </div>
+          <div class="bars" title="зелёный — дослушал, оранжевый — скипнул">
+            <i class="finish" style="width:${finish}%"></i>
+            <i class="skip" style="width:${skip}%"></i>
+          </div>
+        </div>`;
+      }).join("")
+    : `<p class="profile-detail">Запусти радио — здесь появится, какие треки заходят, а какие ты скипаешь.</p>`;
+  const novelty = decision.explore_share != null
+    ? `В последнем наборе нового было ${pct(decision.explore_share)}.`
+    : "После запуска радио здесь будет видно, сколько нового оно подмешало.";
+  const learning = explore.bandit_ready
+    ? "Радио уже само подкручивает новизну по твоим скипах и дослушиваниям."
+    : "Пока новизна в заданных тобой границах. Чем больше слушаешь, тем точнее подбор.";
+  $("monitor-box").innerHTML = `
+    <div class="panel-kicker">радио</div>
+    <div class="monitor-title"><strong>Как играет</strong></div>
+    <div class="stat-grid">
+      <div class="stat"><b>${week.listens_7d || overall.played || 0}</b><span>за неделю</span></div>
+      <div class="stat"><b>${pct(overall.finish_rate || (week.completes_7d && week.listens_7d ? week.completes_7d / week.listens_7d : 0))}</b><span>дослушано</span></div>
+      <div class="stat"><b>${pct(week.skip_rate_7d || overall.early_skip_rate)}</b><span>скипов</span></div>
+      <div class="stat"><b>${week.unique_artists_7d || 0}</b><span>артистов</span></div>
+    </div>
+    <div class="monitor-block">
+      <strong>Откуда берутся треки</strong>
+      <p class="profile-detail bar-legend"><span class="dot finish"></span> дослушал <span class="dot skip"></span> скипнул</p>
+      ${sourceRows}
+    </div>
+    <p class="profile-lead">${novelty}</p>
+    <p class="profile-detail">${learning}</p>`;
+}
+
+function paintRange(input) {
+  if (!input) return;
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const span = max - min;
+  const pct = span > 0 ? ((Number(input.value) - min) / span) * 100 : 0;
+  input.style.setProperty("--fill", `${Math.max(0, Math.min(100, pct))}%`);
+}
+
+function bindExploreBounds() {
+  const lo = $("explore-lo");
+  const hi = $("explore-hi");
+  const label = $("explore-bounds-label");
+  const save = $("btn-explore-save");
+  const loVal = $("explore-lo-val");
+  const hiVal = $("explore-hi-val");
+  if (!lo || !hi || !label || !save) return;
+  const render = () => {
+    let a = Number(lo.value);
+    let b = Number(hi.value);
+    if (a >= b) {
+      a = Math.max(0, b - 0.05);
+      lo.value = String(a);
+    }
+    if (loVal) loVal.textContent = pct(a);
+    if (hiVal) hiVal.textContent = pct(b);
+    label.textContent = `Нового будет от ${pct(a)} до ${pct(b)}`;
+    paintRange(lo);
+    paintRange(hi);
+  };
+  lo.oninput = render;
+  hi.oninput = render;
+  save.onclick = async () => {
+    const data = await api("/api/profile/explore", {
+      method: "PUT",
+      body: JSON.stringify({
+        explore_lo: Number(lo.value),
+        explore_hi: Number(hi.value),
+      }),
+    });
+    lo.value = data.explore_lo;
+    hi.value = data.explore_hi;
+    render();
+    toast("Сохранено");
+  };
+  render();
 }
 
 async function createShareLink() {
@@ -1292,22 +1737,113 @@ function togglePlay() {
 }
 
 async function skipTrack() {
-  await postEvent("skip", {
+  const audio = $("audio");
+  const fromId = current?.id;
+  bumpPlayback();
+  audio.pause();
+  const data = await postEvent("skip", {
     reason: "skipped",
+    track_id: fromId,
+    impression_id: current?.impression_id,
     listened_sec: listenedAccum,
-    duration_sec: $("audio").duration || current?.duration || 0,
+    duration_sec: audio.duration || current?.duration || 0,
   });
+  const nextId = data?.next?.id || data?.next_id;
+  if (audio.paused && (!nextId || Number(nextId) === Number(fromId))) {
+    audio.play().catch(() => {});
+  }
+}
+
+const VOLUME_ICON = `<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.5 9.2h3.4L12.2 5v14l-4.3-4.2H4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M16 9.2a4.2 4.2 0 0 1 0 5.6M18.2 7a7 7 0 0 1 0 10"/></svg>`;
+const MUTE_ICON = `<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.5 9.2h3.4L12.2 5v14l-4.3-4.2H4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M16 10l4 4m0-4-4 4"/></svg>`;
+let volumeOn = 1;
+
+function savedVolume(key, fallback) {
+  const n = Number(localStorage.getItem(key));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+function setVolume(level) {
+  const audio = $("audio");
+  const value = Math.max(0, Math.min(1, Number(level) || 0));
+  if (audio) audio.volume = value;
+  for (const id of ["volume", "mini-volume"]) {
+    const input = $(id);
+    if (!input) continue;
+    input.value = String(value);
+    paintRange(input);
+  }
+  const mute = $("btn-mute");
+  if (mute) {
+    mute.innerHTML = value <= 0.001 ? MUTE_ICON : VOLUME_ICON;
+    mute.title = value <= 0.001 ? "Включить звук" : "Выключить звук";
+  }
+  localStorage.setItem("musik_volume", String(value));
+  if (value > 0.001) {
+    volumeOn = value;
+    localStorage.setItem("musik_volume_on", String(value));
+  }
+}
+
+function toggleMute() {
+  const audio = $("audio");
+  if (!audio) return;
+  if (audio.volume > 0.001) setVolume(0);
+  else setVolume(volumeOn > 0.001 ? volumeOn : 1);
+}
+
+async function backTrack() {
+  const audio = $("audio");
+  if (!audio?.src || !current) {
+    toast("Сейчас ничего не играет");
+    return;
+  }
+  if ((audio.currentTime || 0) > 3) {
+    audio.currentTime = 0;
+    lastPos = 0;
+    listenedAccum = 0;
+    const seek = $("seek");
+    if (seek) seek.value = 0;
+    setSeekPct(0);
+    $("time-cur").textContent = "0:00";
+    if (audio.paused) audio.play().then(() => setPlayIcon(true)).catch(() => {});
+    return;
+  }
+  const data = await api("/api/session/back", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  audio.dataset.trackId = "";
+  applyPlayPayload(data);
+}
+
+let resumeAfterSeek = false;
+
+function finishSeek() {
+  const audio = $("audio");
+  seeking = false;
+  lastPos = audio.currentTime || 0;
+  if (resumeAfterSeek && audio.paused && audio.src) {
+    audio.play().catch(() => {});
+  }
+  resumeAfterSeek = false;
 }
 
 function commitSeek() {
   const audio = $("audio");
   const seek = $("seek");
-  if (audio.duration) {
-    audio.currentTime = (Number(seek.value) / 1000) * audio.duration;
-    lastPos = audio.currentTime;
-    setSeekPct((Number(seek.value) / 1000) * 100);
+  if (!seeking) return;
+  if (!audio.duration || !Number.isFinite(audio.duration)) {
+    finishSeek();
+    return;
   }
-  seeking = false;
+  const t = Math.max(0, Math.min(audio.duration - 0.05, (Number(seek.value) / 1000) * audio.duration));
+  if (!audio.paused) resumeAfterSeek = true;
+  audio.currentTime = t;
+  lastPos = t;
+  setSeekPct((t / audio.duration) * 100);
+  if (Math.abs((audio.currentTime || 0) - t) < 0.05 && !audio.seeking) finishSeek();
 }
 
 function wireAudio() {
@@ -1318,7 +1854,7 @@ function wireAudio() {
     const pos = audio.currentTime || 0;
     if (pos > lastPos) listenedAccum += pos - lastPos;
     lastPos = pos;
-    if (!seeking && audio.duration) {
+    if (!seeking && !audio.seeking && audio.duration && Number.isFinite(audio.duration)) {
       const pct = (pos / audio.duration) * 100;
       seek.value = Math.round((pos / audio.duration) * 1000);
       setSeekPct(pct);
@@ -1339,10 +1875,19 @@ function wireAudio() {
     $("time-dur").textContent = fmtTime(audio.duration || 0);
   });
   audio.addEventListener("play", () => setPlayIcon(true));
-  audio.addEventListener("pause", () => setPlayIcon(false));
+  audio.addEventListener("pause", () => {
+    if (seeking || audio.seeking) return;
+    setPlayIcon(false);
+  });
+  audio.addEventListener("seeked", finishSeek);
   audio.addEventListener("ended", () => {
+    const id = Number(audio.dataset.trackId || 0);
+    const gen = Number(audio.dataset.gen || 0);
+    if (!id || gen !== playbackGen || id !== current?.id) return;
     postEvent("track_end", {
       reason: "completed",
+      track_id: id,
+      impression_id: current?.impression_id,
       listened_sec: listenedAccum,
       duration_sec: audio.duration || current?.duration || 0,
     }).catch(console.error);
@@ -1558,6 +2103,8 @@ async function refreshBackgroundJobs({ initial = false } = {}) {
       }
     });
     if (libraryChanged) {
+      library = [];
+      homeHydrated = false;
       loadLibrary().catch(() => {});
       loadHomeCatalog().catch(() => {});
     }
@@ -1827,6 +2374,569 @@ async function refreshMixes() {
   }
 }
 
+let selectedPlaylistId = null;
+let playlistCache = [];
+let plAddTimer = null;
+let playlistPickTrackId = null;
+let playlistPickTrackIds = [];
+
+function isCustomPlaylist(pl) {
+  return pl && (pl.type === "manual" || pl.type === "smart" || pl.kind === "user");
+}
+
+function playlistKindLabel(pl) {
+  if (!pl) return "свой список";
+  if (typeof pl === "string") {
+    if (pl === "smart") return "собирается сам";
+    if (pl === "generated") return "микс";
+    return "свой список";
+  }
+  if (pl.type === "smart") return "собирается сам";
+  if (isCustomPlaylist(pl)) return "свой список";
+  return "микс";
+}
+
+async function addTracksToPlaylist(playlistId, trackIds) {
+  const ids = [...new Set((trackIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return toast("Нечего добавить");
+  try {
+    const data = await api(`/api/playlists/${playlistId}/tracks`, {
+      method: "POST",
+      body: JSON.stringify({ track_ids: ids, source: "manual" }),
+    });
+    const added = data.added ?? ids.length;
+    const skipped = data.skipped || 0;
+    if (added && skipped) toast(`Добавлено ${added}, уже были ${skipped}`);
+    else if (added) toast(added === 1 ? "Добавлено в плейлист" : `Добавлено ${added} ${ruTracks(added)}`);
+    else toast("Это уже есть в плейлисте");
+    if (selectedPlaylistId === Number(playlistId) && $("pl-detail") && !$("pl-detail").hidden) {
+      await refreshPlaylistTracks(playlistId);
+    }
+    loadPlaylists().catch(() => {});
+  } catch (e) {
+    const msg = e.message || String(e);
+    toast(/duplicate/i.test(msg) ? "Эта песня уже в плейлисте" : msg);
+  }
+}
+
+async function addTrackToPlaylist(playlistId, trackId) {
+  return addTracksToPlaylist(playlistId, [trackId]);
+}
+
+function closePlaylistPicker() {
+  playlistPickTrackId = null;
+  playlistPickTrackIds = [];
+  const box = $("pl-picker");
+  if (box) box.hidden = true;
+}
+
+async function pickPlaylistForTracks(trackIds) {
+  const ids = [...new Set((trackIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return toast("Нечего добавить");
+  playlistPickTrackIds = ids;
+  playlistPickTrackId = ids[0];
+  if (!playlistCache.length) {
+    const data = await api("/api/playlists");
+    playlistCache = data.playlists || [];
+  }
+  const box = $("pl-picker");
+  const list = $("pl-picker-list");
+  if (!box || !list) return;
+  const manuals = playlistCache.filter((p) => isCustomPlaylist(p) && p.type !== "smart");
+  list.innerHTML = manuals.length
+    ? manuals
+        .map(
+          (p) =>
+            `<button type="button" data-pick-pl="${p.id}">${escapeHtml(p.name)} · ${p.track_count || 0}</button>`
+        )
+        .join("")
+    : '<p class="sub">Пока нет своего плейлиста — создай ниже.</p>';
+  list.querySelectorAll("[data-pick-pl]").forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.pickPl);
+      const tracks = playlistPickTrackIds.length ? playlistPickTrackIds : [playlistPickTrackId];
+      closePlaylistPicker();
+      await addTracksToPlaylist(id, tracks);
+    };
+  });
+  box.hidden = false;
+}
+
+async function pickPlaylistForTrack(trackId) {
+  return pickPlaylistForTracks([trackId]);
+}
+
+async function hideNow(targetType, preset) {
+  if (!current?.id) return toast("Сейчас ничего не играет");
+  const body = {
+    target_type: targetType,
+    action: "block",
+    scope: preset === "session" ? "session" : "global",
+    session_id: preset === "session" ? sessionId : undefined,
+    preset,
+    track_id: current.id,
+    artist: current.artist,
+    album: current.album,
+  };
+  await api("/api/rules", { method: "POST", body: JSON.stringify(body) });
+  toast(targetType === "artist" ? "Артист скрыт" : "Трек скрыт");
+}
+
+async function loadContexts() {
+  const box = $("contexts-box");
+  if (!box) return;
+  const data = await api("/api/contexts");
+  const items = data.contexts || [];
+  const kindLabel = { mood: "настроение", place: "место", activity: "занятие" };
+  box.innerHTML = `<div class="panel-kicker">сейчас</div>
+    <strong>Настроение</strong>
+    <p class="sub">Подсказка радио: ночь, дорога, уборка. Можно включить несколько сразу.</p>
+    <div class="form-row">
+      <input id="ctx-name" type="text" placeholder="Ночная дорога" />
+      <select id="ctx-kind">
+        <option value="mood">настроение</option>
+        <option value="place">место</option>
+        <option value="activity">занятие</option>
+      </select>
+      <button type="button" class="btn" id="btn-ctx-create">Добавить</button>
+    </div>
+    <div id="ctx-list">${items.map((c) => `
+      <div class="collection-item">
+        <span>${escapeHtml(c.name)}<small> · ${escapeHtml(kindLabel[c.kind] || c.kind)}</small></span>
+        <span>
+          <button type="button" class="chip context-chip" data-ctx="${c.context_id}" data-on="1">в радио</button>
+          <button type="button" class="chip" data-ctx="${c.context_id}" data-on="0">выкл</button>
+          <button type="button" class="chip" data-archive-ctx="${c.context_id}">удалить</button>
+        </span>
+      </div>`).join("") || "<p class='sub'>Пока пусто — добавь, если хочешь сменить настроение</p>"}</div>`;
+  $("btn-ctx-create").onclick = async () => {
+    await api("/api/contexts", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("ctx-name").value,
+        kind: $("ctx-kind").value,
+        influence: 1,
+        learning_enabled: true,
+      }),
+    });
+    toast("Добавлено");
+    loadContexts();
+  };
+  box.querySelectorAll("[data-ctx]").forEach((btn) => {
+    btn.onclick = async () => {
+      if (!sessionId) return toast("Сначала запусти радио");
+      const on = btn.dataset.on === "1";
+      await api(`/api/contexts/${btn.dataset.ctx}/${on ? "activate" : "deactivate"}`, {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      toast(on ? "Включено в радио" : "Выключено");
+    };
+  });
+  box.querySelectorAll("[data-archive-ctx]").forEach((btn) => {
+    btn.onclick = async () => {
+      await api(`/api/contexts/${btn.dataset.archiveCtx}`, { method: "DELETE" });
+      loadContexts();
+    };
+  });
+}
+
+async function loadRules() {
+  const box = $("rules-box");
+  if (!box) return;
+  const data = await api("/api/rules?all=1");
+  const items = data.rules || [];
+  const actionLabel = { block: "скрыто", downrank: "реже", cooldown: "пауза" };
+  const targetLabel = { track: "трек", artist: "артист", album: "альбом", genre: "жанр", cluster: "похожее" };
+  box.innerHTML = `<div class="panel-kicker">фильтр</div>
+    <strong>Скрыто из радио</strong>
+    <p class="sub">Временный запрет. Дизлайк — это отдельно: он учит вкус, а это просто «не сейчас».</p>
+    <button type="button" class="btn" id="btn-rule-undo">Вернуть последнее</button>
+    ${items.map((r) => `
+      <div class="collection-item">
+        <span>${escapeHtml(actionLabel[r.action] || r.action)} · ${escapeHtml(targetLabel[r.target_type] || r.target_type)} «${escapeHtml(r.target_key)}»</span>
+        <button type="button" class="chip" data-archive-rule="${r.rule_id}">вернуть</button>
+      </div>`).join("") || "<p class='sub'>Ничего не скрыто</p>"}`;
+  $("btn-rule-undo").onclick = async () => {
+    await api("/api/rules/undo", { method: "POST", body: "{}" });
+    loadRules();
+  };
+  box.querySelectorAll("[data-archive-rule]").forEach((btn) => {
+    btn.onclick = async () => {
+      await api(`/api/rules/${btn.dataset.archiveRule}`, { method: "DELETE" });
+      loadRules();
+    };
+  });
+}
+
+async function loadPlaylists() {
+  const host = $("pl-list");
+  if (!host) return;
+  try {
+    const data = await api("/api/playlists");
+    playlistCache = data.playlists || [];
+  } catch (e) {
+    host.innerHTML = `<p class="sub">Не удалось загрузить плейлисты: ${escapeHtml(e.message || String(e))}</p>`;
+    return;
+  }
+  if (!playlistCache.length) {
+    host.innerHTML = '<p class="sub">Пока пусто. Создай сверху или нажми «Из библиотеки».</p>';
+    return;
+  }
+  host.innerHTML = playlistCache
+    .map(
+      (p) => `
+    <article class="pl-card" data-open-pl="${p.id}">
+      <strong>${escapeHtml(p.name)}</strong>
+      <div class="pl-meta">${p.track_count || 0} ${ruTracks(p.track_count || 0)} · ${playlistKindLabel(p)}</div>
+      <div class="pl-card-actions">
+        <button type="button" class="tiny" data-del-pl="${p.id}">убрать</button>
+        <button type="button" class="pl-card-play" data-play-pl="${p.id}" title="Играть">▶</button>
+      </div>
+    </article>`
+    )
+    .join("");
+  host.querySelectorAll("[data-open-pl]").forEach((card) => {
+    card.onclick = (e) => {
+      if (e.target.closest("[data-play-pl], [data-del-pl]")) return;
+      openPlaylist(Number(card.dataset.openPl)).catch((err) => toast(err.message || String(err)));
+    };
+  });
+  host.querySelectorAll("[data-play-pl]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      api(`/api/playlists/${b.dataset.playPl}/play`, { method: "POST", body: "{}" })
+        .then((data) => {
+          applyPlayPayload(data);
+          setView("player");
+        })
+        .catch((err) => toast(err.message || String(err)));
+    };
+  });
+  host.querySelectorAll("[data-del-pl]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const id = Number(b.dataset.delPl);
+      const pl = playlistCache.find((p) => p.id === id);
+      deletePlaylist(id, pl?.name || "плейлист").catch((err) => toast(err.message || String(err)));
+    };
+  });
+}
+
+async function deletePlaylist(id, name) {
+  if (!confirm(`Удалить плейлист «${name}»?`)) return;
+  await api(`/api/playlists/${id}?hard=1`, { method: "DELETE" });
+  if (selectedPlaylistId === Number(id)) {
+    const box = $("pl-detail");
+    if (box) box.hidden = true;
+    selectedPlaylistId = null;
+  }
+  toast("Плейлист убран");
+  await loadPlaylists();
+}
+
+function ruTracks(n) {
+  const abs = Math.abs(n) % 100;
+  const d = abs % 10;
+  if (abs > 10 && abs < 20) return "песен";
+  if (d === 1) return "песня";
+  if (d >= 2 && d <= 4) return "песни";
+  return "песен";
+}
+
+function playlistTrackHTML(tracks, canEdit) {
+  if (!tracks.length) {
+    return '<p class="sub">Пусто. Ниже — вся библиотека: треки, артисты и альбомы. Нажми, чтобы добавить.</p>';
+  }
+  return tracks
+    .map(
+      (t, i) => `
+      <div class="pl-track">
+        <span class="sub">${i + 1}</span>
+        <button type="button" class="linkish" data-play-item="${t.track_id || ""}">${escapeHtml(t.artist || t.unresolved_artist || "")} — ${escapeHtml(t.title || t.unresolved_title || "не найден")}</button>
+        <span class="sub">${fmtTime(t.duration || 0)}</span>
+        ${canEdit && (t.item_id || t.track_id) ? `<button type="button" class="tiny" data-del-item="${escapeHtml(t.item_id || String(t.track_id))}">убрать</button>` : "<span></span>"}
+      </div>`
+    )
+    .join("");
+}
+
+function bindPlaylistTrackRows(box, playlistId) {
+  box.querySelectorAll("[data-play-item]").forEach((btn) => {
+    btn.onclick = () => {
+      const tid = Number(btn.dataset.playItem);
+      if (!tid) return;
+      playFixed({ track_id: tid, name: btn.textContent }).catch((e) => toast(e.message || String(e)));
+    };
+  });
+  box.querySelectorAll("[data-del-item]").forEach((b) => {
+    b.onclick = async () => {
+      await api(`/api/playlists/${playlistId}/tracks/${encodeURIComponent(b.dataset.delItem)}`, { method: "DELETE" });
+      refreshPlaylistTracks(playlistId);
+    };
+  });
+}
+
+async function refreshPlaylistTracks(id) {
+  const pl = await api(`/api/playlists/${id}`);
+  const tracks = pl.tracks || [];
+  const canEdit = isCustomPlaylist(pl);
+  const count = $("pl-count");
+  if (count) count.textContent = `${tracks.length} ${ruTracks(tracks.length)} · ${playlistKindLabel(pl)}`;
+  const host = $("pl-now-list");
+  if (host) {
+    host.innerHTML = playlistTrackHTML(tracks, canEdit);
+    bindPlaylistTrackRows(host, id);
+  }
+}
+
+function renderPlaylistBrowser(playlistId) {
+  const q = ($("pl-add-q")?.value || "").trim().toLowerCase();
+  const ul = $("pl-add-list");
+  const grid = $("pl-add-grid");
+  if (!ul || !grid) return;
+  const { artists, albums } = groupCatalog(library);
+
+  document.querySelectorAll("#pl-add-tabs .seg-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.plTab === plAddTab);
+  });
+
+  if (plAddTab === "tracks" || plAddTab === "favorites") {
+    ul.hidden = false;
+    grid.hidden = true;
+    grid.innerHTML = "";
+    ul.innerHTML = "";
+    const source = plAddTab === "favorites" ? library.filter((t) => favoriteIds.has(t.id)) : library;
+    const rows = sortTracks(
+      source.filter((t) => !q || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(q)),
+      plAddSort
+    ).slice(0, 400);
+    if (!rows.length) {
+      ul.innerHTML = `<li class="sub" style="padding:.8rem 0">${q ? "Ничего не нашлось" : "Пусто"}</li>`;
+      return;
+    }
+    rows.forEach((t) => {
+      const li = document.createElement("li");
+      li.className = "track-row";
+      li.innerHTML = `
+        <button type="button" class="linkish">${escapeHtml(t.artist || "")} — ${escapeHtml(t.title || "")}</button>
+        <span class="dur">${fmtTime(t.duration || 0)}</span>
+        <span class="row-actions"><button type="button" class="tiny">добавить</button></span>`;
+      const add = () => addTrackToPlaylist(playlistId, t.id);
+      li.querySelector(".linkish").onclick = add;
+      li.querySelector(".tiny").onclick = add;
+      ul.appendChild(li);
+    });
+    return;
+  }
+
+  ul.hidden = true;
+  ul.innerHTML = "";
+  grid.hidden = false;
+  grid.innerHTML = "";
+
+  if (plAddTab === "artists") {
+    sortArtists(
+      artists.filter((a) => !q || a.artist.toLowerCase().includes(q)),
+      plAddSort
+    ).forEach((a) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "lib-tile artist";
+      btn.innerHTML = `
+        ${tileArtHTML(a.cover, a.artist)}
+        <strong>${escapeHtml(a.artist)}</strong>
+        <span>${a.tracks} ${ruTracks(a.tracks)}</span>
+        <div class="mix-meta">добавить всё</div>`;
+      btn.onclick = () =>
+        addTracksToPlaylist(
+          playlistId,
+          tracksOfArtist(a.artist).map((t) => t.id)
+        );
+      grid.appendChild(btn);
+    });
+    return;
+  }
+
+  sortAlbums(
+    albums.filter((al) => !q || `${al.artist} ${al.album}`.toLowerCase().includes(q)),
+    plAddSort
+  ).forEach((al) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "lib-tile";
+    btn.innerHTML = `
+      ${tileArtHTML(al.cover, al.album)}
+      <strong>${escapeHtml(al.album)}</strong>
+      <span>${escapeHtml(al.artist)}</span>
+      <div class="mix-meta">добавить ${al.tracks} ${ruTracks(al.tracks)}</div>`;
+    btn.onclick = () =>
+      addTracksToPlaylist(
+        playlistId,
+        tracksOfAlbum(al.artist, al.album).map((t) => t.id)
+      );
+    grid.appendChild(btn);
+  });
+}
+
+async function openPlaylist(id) {
+  selectedPlaylistId = Number(id);
+  const pl = await api(`/api/playlists/${id}`);
+  const box = $("pl-detail");
+  box.hidden = false;
+  const tracks = pl.tracks || [];
+  const canEdit = isCustomPlaylist(pl);
+  box.innerHTML = `
+    <div class="pl-detail-head">
+      <div>
+        <button type="button" class="text-link" id="btn-pl-back">← ко всем</button>
+        <h2 style="margin:.25rem 0 0">${escapeHtml(pl.name)}</h2>
+        <p class="sub" id="pl-count">${tracks.length} ${ruTracks(tracks.length)} · ${playlistKindLabel(pl)}</p>
+      </div>
+      <div class="form-row" style="margin:0">
+        <button type="button" class="btn primary" id="btn-pl-play-here">Играть</button>
+        <button type="button" class="btn" id="btn-pl-radio">Радио отсюда</button>
+        ${canEdit ? `<button type="button" class="btn quiet" id="btn-pl-del">Убрать плейлист</button>` : ""}
+      </div>
+    </div>
+    <div id="pl-now-list">${playlistTrackHTML(tracks, canEdit)}</div>
+    ${
+      canEdit
+        ? `<div class="pl-browser">
+      <h3>Добавить из библиотеки</h3>
+      <div class="seg" id="pl-add-tabs" role="tablist">
+        <button type="button" class="seg-btn active" data-pl-tab="tracks">Треки</button>
+        <button type="button" class="seg-btn" data-pl-tab="artists">Артисты</button>
+        <button type="button" class="seg-btn" data-pl-tab="albums">Альбомы</button>
+        <button type="button" class="seg-btn" data-pl-tab="favorites">Избранное</button>
+      </div>
+      <div class="lib-tools">
+        <input id="pl-add-q" type="search" placeholder="Поиск…" autocomplete="off" />
+        <select id="pl-add-sort" aria-label="Сортировка"></select>
+      </div>
+      <ul id="pl-add-list" class="track-list"></ul>
+      <div id="pl-add-grid" class="lib-grid" hidden></div>
+      <div class="form-row">
+        <button type="button" class="btn" id="btn-pl-now">Добавить то, что играет</button>
+        <button type="button" class="btn" id="btn-pl-queue">Добавить очередь радио</button>
+      </div>
+    </div>`
+        : ""
+    }
+    <div class="form-row">
+      <button type="button" class="btn quiet" id="btn-pl-dup">Копия</button>
+      <button type="button" class="btn quiet" id="btn-pl-export">Скачать</button>
+    </div>`;
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+  $("btn-pl-back").onclick = () => {
+    box.hidden = true;
+    selectedPlaylistId = null;
+  };
+  $("btn-pl-play-here").onclick = async () => {
+    const data = await api(`/api/playlists/${id}/play`, { method: "POST", body: "{}" });
+    applyPlayPayload(data);
+    setView("player");
+  };
+  $("btn-pl-radio").onclick = async () => {
+    const data = await api(`/api/playlists/${id}/radio`, { method: "POST", body: "{}" });
+    applyPlayPayload(data);
+    setView("player");
+  };
+  bindPlaylistTrackRows($("pl-now-list") || box, id);
+  const addQ = $("pl-add-q");
+  if (addQ) {
+    await ensureLibrary().catch(() => {});
+    plAddSort = fillSortSelect($("pl-add-sort"), plAddTab, plAddSort);
+    renderPlaylistBrowser(id);
+    addQ.oninput = () => {
+      clearTimeout(plAddTimer);
+      plAddTimer = setTimeout(() => renderPlaylistBrowser(id), 80);
+    };
+    $("pl-add-sort").onchange = () => {
+      plAddSort = $("pl-add-sort").value;
+      renderPlaylistBrowser(id);
+    };
+    $("pl-add-tabs").querySelectorAll("[data-pl-tab]").forEach((btn) => {
+      btn.onclick = () => {
+        plAddTab = btn.dataset.plTab;
+        plAddSort = fillSortSelect($("pl-add-sort"), plAddTab, plAddSort);
+        addQ.placeholder =
+          plAddTab === "artists" ? "Поиск артиста…" : plAddTab === "albums" ? "Поиск альбома…" : "Артист, трек, альбом…";
+        renderPlaylistBrowser(id);
+      };
+    });
+  }
+  const addNow = $("btn-pl-now");
+  if (addNow) {
+    addNow.onclick = () => {
+      if (!current?.id) return toast("Сейчас ничего не играет");
+      addTrackToPlaylist(id, current.id);
+    };
+  }
+  const addQueue = $("btn-pl-queue");
+  if (addQueue) {
+    addQueue.onclick = async () => {
+      if (!sessionId) return toast("Сначала запусти радио");
+      await api(`/api/playlists/${id}/from-queue`, { method: "POST", body: JSON.stringify({ session_id: sessionId }) });
+      toast("Очередь добавлена");
+      openPlaylist(id);
+    };
+  }
+  $("btn-pl-dup").onclick = async () => {
+    const copy = await api(`/api/playlists/${id}/duplicate`, { method: "POST", body: "{}" });
+    toast("Сделана копия");
+    await loadPlaylists();
+    if (copy?.id) openPlaylist(copy.id);
+  };
+  $("btn-pl-export").onclick = () => {
+    window.location.href = `/api/playlists/${id}/export`;
+  };
+  const delBtn = $("btn-pl-del");
+  if (delBtn) {
+    delBtn.onclick = () => deletePlaylist(id, pl.name).catch((e) => toast(e.message || String(e)));
+  }
+}
+
+async function createEmptyPlaylist() {
+  const name = ($("pl-name").value || "").trim();
+  if (!name) return toast("Напиши название");
+  const pl = await api("/api/playlists", {
+    method: "POST",
+    body: JSON.stringify({ name, type: "manual", kind: "user" }),
+  });
+  $("pl-name").value = "";
+  const pending = playlistPickTrackIds.length
+    ? playlistPickTrackIds.slice()
+    : playlistPickTrackId
+      ? [playlistPickTrackId]
+      : [];
+  playlistPickTrackId = null;
+  playlistPickTrackIds = [];
+  toast("Готово — добавь песни из библиотеки ниже");
+  await loadPlaylists();
+  if (pl?.id) {
+    await openPlaylist(pl.id);
+    if (pending.length) await addTracksToPlaylist(pl.id, pending);
+  }
+}
+
+async function startFromLibrary() {
+  let name = ($("pl-name").value || "").trim();
+  if (!name) name = "Из библиотеки";
+  const pl = await api("/api/playlists", {
+    method: "POST",
+    body: JSON.stringify({ name, type: "manual", kind: "user" }),
+  });
+  $("pl-name").value = "";
+  toast("Открыл библиотеку — жми трек, артиста или альбом");
+  await loadPlaylists();
+  if (pl?.id) {
+    plAddTab = "tracks";
+    await openPlaylist(pl.id);
+    $("pl-add-q")?.focus();
+  }
+}
+
 function wire() {
   document.querySelectorAll(".tab").forEach((b) => {
     b.onclick = () => setView(b.dataset.view);
@@ -1837,9 +2947,13 @@ function wire() {
       setView("library");
     };
   });
-  document.querySelectorAll(".seg-btn").forEach((b) => {
+  document.querySelectorAll("#view-library .seg-btn").forEach((b) => {
     b.onclick = () => setLibTab(b.dataset.lib);
   });
+  $("lib-sort").onchange = () => {
+    libSort = $("lib-sort").value;
+    renderLib($("lib-filter").value || "");
+  };
   wireAllShelves();
   $("btn-radio").onclick = () => startRadio().catch((e) => toast(e.message || String(e)));
   $("btn-share-radio").onclick = () => createShareLink().catch((e) => toast(e.message || String(e)));
@@ -1902,12 +3016,84 @@ function wire() {
       toast(e.message || String(e));
     }
   };
+  $("btn-hide-track").onclick = () => hideNow("track", "day").catch((e) => toast(e.message || String(e)));
+  $("btn-hide-artist").onclick = () => hideNow("artist", "week").catch((e) => toast(e.message || String(e)));
+  $("btn-pl-create").onclick = () => createEmptyPlaylist().catch((e) => toast(e.message || String(e)));
+  $("pl-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      createEmptyPlaylist().catch((err) => toast(err.message || String(err)));
+    }
+  });
+  $("btn-pl-from-lib").onclick = () => startFromLibrary().catch((e) => toast(e.message || String(e)));
+  $("btn-pl-from-fav").onclick = () =>
+    api("/api/playlists/from-favorites", { method: "POST", body: "{}" })
+      .then(async (pl) => {
+        toast("Скопировал любимое");
+        await loadPlaylists();
+        if (pl?.id) openPlaylist(pl.id);
+      })
+      .catch((e) => toast(e.message || String(e)));
+  $("btn-pl-from-later").onclick = () =>
+    api("/api/playlists/from-later", { method: "POST", body: "{}" })
+      .then(async (pl) => {
+        toast("Скопировал «Потом»");
+        await loadPlaylists();
+        if (pl?.id) openPlaylist(pl.id);
+      })
+      .catch((e) => toast(e.message || String(e)));
+  $("btn-add-pl").onclick = () => {
+    if (!current?.id) return toast("Сначала включи песню");
+    pickPlaylistForTrack(current.id).catch((e) => toast(e.message || String(e)));
+  };
+  $("btn-pl-picker-cancel").onclick = closePlaylistPicker;
+  $("btn-pl-picker-new").onclick = () => {
+    const trackId = playlistPickTrackId;
+    $("pl-picker").hidden = true;
+    playlistPickTrackId = trackId;
+    setView("collections");
+    $("pl-name").focus();
+  };
+  $("pl-picker").addEventListener("click", (e) => {
+    if (e.target.id === "pl-picker") closePlaylistPicker();
+  });
+  $("btn-pl-import").onclick = () => $("pl-import-file").click();
+  $("pl-import-file").onchange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const ct = file.name.endsWith(".json") ? "application/json" : "audio/x-mpegurl";
+      const res = await fetch("/api/playlists/import?name=" + encodeURIComponent(file.name), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": ct },
+        body: text,
+      });
+      if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+      toast("Импортировано");
+      await loadPlaylists();
+    } catch (err) {
+      toast(err.message || String(err));
+    }
+    e.target.value = "";
+  };
   $("btn-dislike").onclick = () => postEvent("dislike").catch((e) => toast(e.message || String(e)));
   $("btn-skip").onclick = () => skipTrack().catch((e) => toast(e.message || String(e)));
   $("mini-skip").onclick = (e) => {
     e.stopPropagation();
     skipTrack().catch((e2) => toast(e2.message || String(e2)));
   };
+  $("btn-back").onclick = () => backTrack().catch((e) => toast(e.message || String(e)));
+  $("mini-back").onclick = (e) => {
+    e.stopPropagation();
+    backTrack().catch((e2) => toast(e2.message || String(e2)));
+  };
+  volumeOn = savedVolume("musik_volume_on", 1) || 1;
+  setVolume(savedVolume("musik_volume", 1));
+  $("volume").oninput = () => setVolume($("volume").value);
+  $("mini-volume").oninput = () => setVolume($("mini-volume").value);
+  $("btn-mute").onclick = toggleMute;
   $("mini-open").onclick = () => setView("player");
   $("btn-later").onclick = async () => {
     if (!current?.id) return toast("Сейчас ничего не играет");
@@ -1927,6 +3113,8 @@ function wire() {
     if (e.code === "Space") {
       e.preventDefault();
       togglePlay();
+    } else if (e.key === "b" || e.key === "B") {
+      backTrack().catch(() => {});
     } else if (e.key === "n" || e.key === "N") {
       skipTrack().catch(() => {});
     } else if (e.key === "l" || e.key === "L") {
@@ -1937,12 +3125,9 @@ function wire() {
 
 async function bootApp() {
   startBackgroundJobsMonitor();
-  try {
-    const p = await api("/api/profile");
-    renderMaturity(p.maturity);
-  } catch (e) {
-    console.error(e);
-  }
+  api("/api/profile")
+    .then((p) => renderMaturity(p.maturity))
+    .catch(console.error);
   loadMixes().catch(console.error);
   loadHomeCatalog().catch(console.error);
   if (sessionId) {

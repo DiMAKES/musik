@@ -23,17 +23,20 @@ def save_playlist(
     now = utcnow()
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO playlists(kind, name, created_at, meta_json) VALUES (?,?,?,?)",
-            (kind, name, now, json.dumps(meta or {}, ensure_ascii=False)),
+            """INSERT INTO playlists(kind, name, created_at, meta_json, type, updated_at)
+               VALUES (?,?,?,?, 'generated', ?)""",
+            (kind, name, now, json.dumps(meta or {}, ensure_ascii=False), now),
         )
         pid = int(cur.lastrowid)
         for pos, e in enumerate(entries):
             conn.execute(
                 """
-                INSERT INTO playlist_tracks(playlist_id, position, track_id, explanation)
-                VALUES (?,?,?,?)
+                INSERT INTO playlist_tracks(
+                    item_id, playlist_id, position, track_id, added_at, source, explanation
+                )
+                VALUES (lower(hex(randomblob(16))),?,?,?,?, 'rule', ?)
                 """,
-                (pid, pos, int(e["track_id"]), e.get("explanation")),
+                (pid, pos, int(e["track_id"]), now, e.get("explanation")),
             )
         if retain > 0:
             conn.execute(

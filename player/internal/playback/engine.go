@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -12,11 +13,13 @@ import (
 )
 
 type Engine struct {
-	Cfg     config.Config
-	Store   *db.Store
-	Idx     *index.Index
-	Taste   *taste.Profile
-	Builder *queue.Builder
+	Cfg        config.Config
+	Store      *db.Store
+	Idx        *index.Index
+	Taste      *taste.Profile
+	TasteState *taste.State
+	Builder    *queue.Builder
+	Ranker     queue.Model
 
 	Enqueue func(func())
 	Flush   func()
@@ -30,10 +33,26 @@ type Engine struct {
 }
 
 func New(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile, builder *queue.Builder) *Engine {
-	return &Engine{
-		Cfg: cfg, Store: store, Idx: idx, Taste: tp, Builder: builder,
-		sessions: map[string]*Session{},
+	engine := &Engine{
+		Cfg: cfg, Store: store, Idx: idx, Taste: tp, TasteState: taste.NewState(tp), Builder: builder,
+		Ranker: queue.LoadRuntimeModel(cfg.RankerPath), sessions: map[string]*Session{},
 	}
+	if rows, err := store.LoadTasteStates(); err == nil {
+		for _, row := range rows {
+			switch {
+			case row.Key == "persistent_negative":
+				var prototypes []taste.NegativePrototype
+				if json.Unmarshal([]byte(row.NegativePrototypesJSON), &prototypes) == nil {
+					engine.TasteState.RestorePersistentNegatives(prototypes)
+				}
+			case len(row.Key) > len("daypart:") && row.Key[:len("daypart:")] == "daypart:":
+				engine.TasteState.RestoreDaypart(row.Key[len("daypart:"):], taste.VectorState{
+					Vector: index.BytesToFloat32(row.PositiveVector), Samples: row.PositiveSamples,
+				})
+			}
+		}
+	}
+	return engine
 }
 
 func (e *Engine) enqueue(work func()) {
@@ -92,6 +111,85 @@ func (e *Engine) ReloadTransitions() {
 	e.transMu.Lock()
 	e.transitions = g
 	e.transMu.Unlock()
+}
+
+func (e *Engine) ReloadRanker() {
+	e.Ranker = queue.LoadRuntimeModel(e.Cfg.RankerPath)
+}
+
+func (e *Engine) radioPrefs() db.RadioPrefs {
+	prefs, err := e.Store.LoadRadioPrefs()
+	if err != nil {
+		lo, hi := queue.ClampExploreBounds(e.Cfg.ExploreLo, e.Cfg.ExploreHi)
+		return db.RadioPrefs{ExploreLo: lo, ExploreHi: hi}
+	}
+	prefs.ExploreLo, prefs.ExploreHi = queue.ClampExploreBounds(prefs.ExploreLo, prefs.ExploreHi)
+	return prefs
+}
+
+func (e *Engine) exploreArms() map[string]queue.Arm {
+	rows, err := e.Store.LoadExploreArms()
+	if err != nil {
+		return nil
+	}
+	out := map[string]queue.Arm{}
+	for _, row := range rows {
+		out[row.ArmKey] = queue.Arm{
+			Key: row.ArmKey, Kind: row.ArmKind, Alpha: row.Alpha, Beta: row.Beta,
+			Successes: row.Successes, Failures: row.Failures, LastDecay: row.LastDecayAt,
+		}
+	}
+	return out
+}
+
+func (e *Engine) exploreCounts() map[string]int {
+	counts, err := e.Store.ExploreSourceOutcomeCounts()
+	if err != nil {
+		return nil
+	}
+	return counts
+}
+
+func (e *Engine) daypartVector(daypart string) []float32 {
+	if e.TasteState == nil {
+		return nil
+	}
+	state := e.TasteState.Daypart(daypart)
+	if state.Samples < taste.DefaultDaypartMinimum {
+		return nil
+	}
+	return state.Vector
+}
+
+func (e *Engine) tasteCentroidVecs() [][]float32 {
+	rows, err := e.Store.LoadTasteCentroids(taste.CentroidAlgorithmVersion)
+	if err != nil {
+		return nil
+	}
+	out := make([][]float32, 0, len(rows))
+	for _, row := range rows {
+		vec := index.BytesToFloat32(row.Vector)
+		if len(vec) == 0 {
+			continue
+		}
+		out = append(out, vec)
+	}
+	return out
+}
+
+func (e *Engine) ObserveExploreOutcome(source, outcome string, played bool) {
+	if !played || !queue.AllowedBanditOutcome(outcome) || source == "manual" || source == "" {
+		return
+	}
+	success := queue.BanditSuccess(outcome)
+	if queue.IsExploreSource(source) {
+		_ = e.Store.UpdateExploreArm(source, "source", success)
+		_ = e.Store.UpdateExploreArm(queue.ArmAggregate, "aggregate", success)
+		return
+	}
+	if queue.IsExploitSource(source) {
+		_ = e.Store.UpdateExploreArm(queue.ArmAggregate, "aggregate", !success)
+	}
 }
 
 func (e *Engine) BumpTransitionMem(from, to int64, w float64) {

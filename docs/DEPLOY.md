@@ -31,6 +31,16 @@ make smoke
 
 Volumes: `musik-data` → SQLite + кэши; библиотека RO из `MUSIK_LIBRARY`.
 
+Порядок старта Compose намеренно строгий:
+
+1. worker выполняет `musik db migrate`;
+2. worker начинает отвечать на `/health`;
+3. только после успешного healthcheck запускается player;
+4. player проверяет, что `PRAGMA user_version` точно совпадает с поддерживаемой
+   версией.
+
+Go player никогда не создаёт и не изменяет таблицы.
+
 ### Публичный VPS (белый IP)
 
 1. Задай сильные секреты в `.env` (не `AUTH_DISABLED`).
@@ -76,11 +86,16 @@ UI **Поделиться** → `…/listen/<token>.mp3`. Отозвать в П
 ```bash
 export MUSIK_PASSWORD=… MUSIK_API_TOKEN=…
 export MUSIK_DB_PATH=$PWD/data/db/musik.db MUSIK_LIBRARY=/path/to/music
+musik db migrate
 musik scan && musik embed && musik clusters
 musik worker   # terminal 1
 ./player/bin/musik-player   # terminal 2
 ```
 
-Schema: Python `init_db` / worker создаёт таблицы; Go при старте — safety-net `CREATE IF NOT EXISTS` (favorites, shares, play_sessions, …).
+Schema: единственный владелец — пронумерованные Python-миграции
+`src/musik/db/migrations.py`. Повторный `musik db migrate` безопасен. Если база
+старее или новее поддерживаемой версии, player завершает старт и печатает
+команду исправления.
 
-Подробнее: [API.md](API.md) · [MOBILE.md](MOBILE.md) · **[CAPACITY.md](CAPACITY.md)** (ресурсы под 50k треков).
+Подробнее: [ROADMAP.md](ROADMAP.md) · [API.md](API.md) · [MOBILE.md](MOBILE.md) ·
+**[CAPACITY.md](CAPACITY.md)** (ресурсы под 50k треков).

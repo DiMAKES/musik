@@ -12,6 +12,12 @@
 > musik не скачивает и не продаёт музыку. Для работы нужна собственная
 > легально полученная аудиотека. Проект рассчитан на одного владельца.
 
+Текущий runtime работает и пригоден для локального использования. Следующее
+направление разработки — корректный lifecycle рекомендаций и единое
+ранжирующее ядро. Актуальный статус, критерии и порядок поставки находятся в
+**[docs/ROADMAP.md](docs/ROADMAP.md)**; старый план «ТЗ 3.0» больше не
+используется.
+
 ## Что умеет
 
 - сканировать локальную музыкальную библиотеку и читать теги;
@@ -31,8 +37,8 @@
 2. Python-воркер сканирует файлы, читает метаданные и вычисляет аудиопризнаки.
 3. CLAP преобразует звучание каждого трека в числовой вектор. Благодаря этому
    система сравнивает музыку по звуку, даже если жанры и теги заполнены плохо.
-4. Go-сервер хранит каталог и историю в SQLite, отдаёт Web UI и стримит
-   аудиофайлы на телефон или компьютер.
+4. Python-мигратор создаёт и обновляет SQLite. Go-сервер проверяет точную версию
+   схемы, отдаёт Web UI и стримит аудиофайлы на телефон или компьютер.
 5. Лайки, пропуски и прослушивания обновляют профиль вкуса. Радио смешивает
    похожие треки, историю, время суток и небольшую долю новых рекомендаций.
 
@@ -70,7 +76,7 @@
 |------|-----|------|------|
 | **Player** | `player/` (Go) | **8787** (публичный) | API, auth, стрим файлов, вкус, Radio/Daily, Web UI, share-radio (ffmpeg) |
 | **Worker** | `src/musik/` (Python) | **8790** (только localhost / внутренняя сеть) | scan, CLAP embed, clusters, mix_pack, jobs |
-| **DB** | `data/db/musik.db` | — | треки, фичи, сессии, favorites, jobs |
+| **DB** | `data/db/musik.db` | — | catalog, events, recommendation foundation, sessions, favorites, jobs |
 | **Кеши** | `data/cache/` | — | embeddings `.npy`, artwork |
 
 Контракты и гайды:
@@ -115,7 +121,7 @@ musik/
 | Путь | Назначение |
 |------|------------|
 | `pyproject.toml` | зависимости Python, скрипт `musik` |
-| `Makefile` | `make up`, `rescan`, `mixes`, `smoke`, `bench`, `player` |
+| `Makefile` | `make up`, `rescan`, `mixes`, `smoke`, `sim`, `bench`, `player` |
 | `docker-compose.yml` | сервисы `player` (:8787) и `worker` (без публикации порта) |
 | `Dockerfile.player` / `Dockerfile.worker` | образы |
 | `.env` / `.env.example` | `MUSIK_*` переменные |
@@ -136,7 +142,7 @@ musik/
 
 Музыкальная коллекция обычно **не** внутри репо: путь задаётся `MUSIK_LIBRARY` (и монтируется RO в Docker).
 
-**Бэкап / перенос на сервер:** копируй `data/db/musik.db` (+ wal/shm при остановленных процессах) и `data/cache/embeddings/`. Файлы аудио на сервере должны иметь те же MD5 (те же байты) — эмбеддинги подтянутся из кеша.
+**Бэкап / перенос / обновление:** копируй `data/db/musik.db` (+ wal/shm при остановленных процессах) и `data/cache/embeddings/`. Файлы аудио должны иметь те же MD5 (те же байты) — эмбеддинги подтянутся из кеша. Как поднять старую базу на новой версии — ниже, в [«Сохранить базу при обновлении»](#сохранить-базу-при-обновлении).
 
 ### `src/musik/` — Python
 
@@ -144,7 +150,8 @@ musik/
 |------|------|
 | `cli.py` | CLI: `musik scan`, `embed`, `clusters`, `worker`, … |
 | `config.py` | настройки (`MUSIK_*`, пути к DB/cache) |
-| `db/schema.py` | схема SQLite |
+| `db/schema.py` | базовая SQLite-схема совместимости |
+| `db/migrations.py` | пронумерованные миграции и `PRAGMA user_version` |
 | `db/store.py` | чтение/запись треков, embeddings, jobs |
 | `scanner/` | обход библиотеки, теги, MD5, LUFS/BPM/key |
 | `embed/clap.py` | модель CLAP (GPU/CPU) |
@@ -165,10 +172,10 @@ musik/
 | `cmd/musik-player/main.go` | точка входа |
 | `internal/config/` | env Go-плеера |
 | `internal/auth/` | пароль, cookie, Bearer, rate-limit логина |
-| `internal/db/` | SQLite: `store.go` схема, дальше файлы по таблицам |
-| `internal/index/` | матрица эмбеддингов в RAM, `SimsTo` (параллельно при N≥1500) |
+| `internal/db/` | SQLite access и точный schema-version gate; миграций в Go нет |
+| `internal/index/` | матрица эмбеддингов в RAM, `TopK`, `SimsTo`, fused exact scan |
 | `internal/taste/` | EMA-вкус |
-| `internal/queue/` | скоринг очереди: taste + transition + daypart + candidate pool |
+| `internal/queue/` | единое ядро очереди: candidates → features → score → select |
 | `internal/library/` | правила библиотеки: безопасные пути загрузки, группировка artist/album |
 | `internal/playback/` | сессии, радио/плейлист, события прослушивания, вкус |
 | `internal/recommend/` | похожие треки / артисты / альбомы |
@@ -186,7 +193,8 @@ musik/
 |--------|------------|
 | `embed_rocm.sh` | `musik embed` через `.venv-rocm` + ROCm libs (AMD GPU) |
 | `smoke_api.sh` | HTTP smoke с auth (`make smoke`) |
-| `bench_queue.sh` | бенч `radio/start` (`make bench`) |
+| `bench_queue.sh` | exact scan / queue и API benchmarks (`make bench`) |
+| `sim_listener.py` | детерминированные listener-сценарии (`make sim`) |
 | `export_paper_cosine.py` | утилита для cosine-таблиц / экспериментов |
 
 ### `docs/` и `tests/`
@@ -203,7 +211,7 @@ musik/
 cp .env.example .env
 # обязательно: MUSIK_PASSWORD, MUSIK_API_TOKEN, MUSIK_SESSION_SECRET, MUSIK_LIBRARY
 
-make up          # http://127.0.0.1:8787
+make up          # worker migrate + healthcheck → player → http://127.0.0.1:8787
 make rescan      # scan+embed+… через jobs
 make mixes
 make smoke
@@ -223,10 +231,12 @@ export MUSIK_LIBRARY=/path/to/music
 export MUSIK_PASSWORD=…
 export MUSIK_API_TOKEN=…
 
+musik db migrate
 musik scan && musik embed && musik clusters
 
 make player
-./player/bin/musik-player   # при MUSIK_WORKER_AUTOSTART=1 сам поднимет worker
+musik worker                # terminal 1; повторно проверяет/применяет migrations
+./player/bin/musik-player   # terminal 2; только проверяет точную версию схемы
 ```
 
 UI: http://127.0.0.1:8787
@@ -257,6 +267,68 @@ UI: http://127.0.0.1:8787
 
 ---
 
+## Сохранить базу при обновлении
+
+Старую установку **не нужно** поднимать с нуля. Треки, эмбеддинги, история
+прослушиваний, избранное и вкус живут в SQLite и кеше на диске. Новая версия
+приложения только мигрирует схему.
+
+Не удаляй `data/db/musik.db` и не запускай блок [«Пайплайн данных (с нуля)»](#пайплайн-данных-с-нуля), если хочешь сохранить библиотеку.
+
+### Что копировать
+
+Останови player и worker, затем сохрани:
+
+| Путь | Зачем |
+|------|--------|
+| `data/db/musik.db` | каталог, история, вкус, избранное, миксы, сессии |
+| `data/db/musik.db-wal` и `musik.db-shm` | хвост транзакций, если файлы есть |
+| `data/cache/embeddings/` | готовые CLAP-векторы — без них 2k треков снова считаются часами |
+| `data/cache/artwork/` | обложки (по желанию) |
+
+Сами аудиофайлы в базу не входят: путь к ним задаёт `MUSIK_LIBRARY`.
+
+Проверка, что WAL дописан (после остановки процессов):
+
+```bash
+sqlite3 data/db/musik.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+```
+
+### Как перенести на новую версию
+
+1. Положи старые файлы на те же места (или укажи `MUSIK_DB_PATH` на копию базы).
+2. В `.env` выставь **ту же папку музыки**, что была раньше (`MUSIK_LIBRARY`).
+3. Обнови схему — треки и история не стираются:
+
+   ```bash
+   musik db migrate
+   ```
+
+   Повторный вызов безопасен. Player стартует только если `PRAGMA user_version`
+   совпадает с поддерживаемой версией (сейчас 5).
+4. Запусти worker и player как обычно. Scan/embed подхватят уже посчитанное
+   по MD5 файла. Пересчитаются только новые или изменённые треки.
+
+Миксы «на сегодня» и дни недели можно пересобрать отдельно — вкус из истории
+останется:
+
+```bash
+make mixes    # или POST /api/jobs/mix_pack
+```
+
+### Чего не делать
+
+- Не указывай `MUSIK_LIBRARY` на меньшую папку и не гоняй `full_rescan` /
+  `make rescan` против неё: пути, которых нет на диске, помечаются неактивными,
+  и большая коллекция пропадёт из каталога, хотя строки в базе ещё будут.
+- Не перекодируй файлы «для порядка» перед переносом: сменится MD5, и CLAP
+  пойдёт заново. Те же байты — тот же кеш.
+- Не копируй `musik.db`, пока player или worker ещё пишут: будет обрезанный WAL.
+
+Если базы нет и нужна именно чистая установка — тогда следующий раздел.
+
+---
+
 ## Пайплайн данных (с нуля)
 
 ```bash
@@ -264,8 +336,9 @@ UI: http://127.0.0.1:8787
 rm -f data/db/musik.db data/db/musik.db-wal data/db/musik.db-shm
 rm -rf data/cache/embeddings/* data/cache/artwork/*
 
-# 2) схема создастся сама при первом запуске / init
+# 2) создать актуальную схему до запуска player
 export MUSIK_LIBRARY=/path/to/music
+musik db migrate
 
 # 3) теги + audio features
 musik scan                 # или: musik scan --tags-only (быстрее, без LUFS/BPM)
@@ -300,7 +373,9 @@ Fail-closed: без пароля/токена player **не стартует**, 
 | API | `Authorization: Bearer $MUSIK_API_TOKEN` |
 | Login | ≤ 5 попыток / IP / мин → `429` |
 
-Ключевые env — в `.env.example`. Для большой библиотеки см. также `MUSIK_WORKERS`, `MUSIK_CANDIDATE_POOL_AT` ([docs/CAPACITY.md](docs/CAPACITY.md)).
+Ключевые env — в `.env.example`. Для большой библиотеки см. также
+`MUSIK_WORKERS` и exact fused scan
+([docs/CAPACITY.md](docs/CAPACITY.md)).
 
 ### Генерация секретов
 
@@ -323,8 +398,9 @@ openssl rand -hex 32  # MUSIK_SESSION_SECRET
 ## Возможности плеера (кратко)
 
 - Каталог / поиск / стрим файлов
-- **Radio** по EMA-вкусу: top-K sample старта, explore, recently-played penalty
-- Transition boost + daypart; при большом N — **candidate pool** (`MUSIK_CANDIDATE_POOL_AT`, default 8000)
+- **Radio** по текущему EMA-вкусу: одно ядро `BuildCore`, learned ranker и gated Thompson
+- Текущий runtime: fused exact scan, source quotas, finish/skip мониторинг в профиле.
+  Дальше: [ROADMAP](docs/ROADMAP.md)
 - Daily / mixes / favorites
 - **Тексты:** `musik lyrics` (LRCLIB) → UI «Текст песни» / `GET /api/tracks/{id}/lyrics`
 - **Watch:** `musik watch` — новые файлы в `MUSIK_LIBRARY` → scan/embed/mixes/reload сами
@@ -365,19 +441,22 @@ CUDA_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= .venv-rocm/bin/musik embed --force
 | `make rescan` | `POST /api/library/rescan` (Bearer) |
 | `make mixes` | `POST /api/jobs/mix_pack` |
 | `make smoke` | smoke API |
-| `make bench` | бенч radio/start |
+| `make sim` | детерминированный listener simulator |
+| `make bench` | exact fused scan, queue build и API latency |
 | `make test-go` | `go test` |
 
 ---
 
 ## Перенос на сервер (после GPU-прогона на ПК)
 
+То же, что при [обновлении со старой базы](#сохранить-базу-при-обновлении): копируется SQLite и кеш эмбеддингов, не музыка заново.
+
 1. На ПК: `scan` → `embed` (ROCm) → `clusters`.
 2. Остановить player/worker.
 3. Скопировать на сервер:
    - `data/db/musik.db` (и wal/shm, либо после checkpoint)
    - `data/cache/embeddings/`
-4. На сервере: та же (байтово) музыкальная библиотека, `MUSIK_LIBRARY=…`, запуск Compose/player **без** обязательного GPU.
+4. На сервере: та же (байтово) музыкальная библиотека, `MUSIK_LIBRARY=…`, `musik db migrate`, запуск Compose/player **без** обязательного GPU.
 
 ---
 

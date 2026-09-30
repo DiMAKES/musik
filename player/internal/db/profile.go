@@ -93,6 +93,191 @@ type ClusterCount struct {
 	Count     int `json:"count"`
 }
 
+type TasteStateRow struct {
+	Key                    string
+	PositiveVector         []byte
+	EmbeddingDim           int
+	PositiveSamples        int
+	NegativeSamples        int
+	NegativePrototypesJSON string
+}
+
+func (s *Store) UpsertTasteState(row TasteStateRow) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var vector any
+	var dim any
+	if len(row.PositiveVector) > 0 {
+		vector, dim = row.PositiveVector, row.EmbeddingDim
+	}
+	var negativeVersion any
+	var negatives any
+	if row.NegativePrototypesJSON != "" {
+		negativeVersion, negatives = 1, row.NegativePrototypesJSON
+	}
+	_, err := s.DB.Exec(`
+INSERT INTO taste_states(
+  state_key, positive_vector, embedding_dim, positive_samples,
+  negative_samples, negative_schema_version, negative_prototypes_json,
+  model_version, updated_at
+) VALUES (?,?,?,?,?,?,?,'clap-default',?)
+ON CONFLICT(state_key) DO UPDATE SET
+  positive_vector=excluded.positive_vector,
+  embedding_dim=excluded.embedding_dim,
+  positive_samples=excluded.positive_samples,
+  negative_samples=excluded.negative_samples,
+  negative_schema_version=excluded.negative_schema_version,
+  negative_prototypes_json=excluded.negative_prototypes_json,
+  model_version=excluded.model_version,
+  updated_at=excluded.updated_at`,
+		row.Key, vector, dim, row.PositiveSamples, row.NegativeSamples,
+		negativeVersion, negatives, now)
+	return err
+}
+
+func (s *Store) LoadTasteStates() ([]TasteStateRow, error) {
+	rows, err := s.DB.Query(`
+SELECT state_key, positive_vector, COALESCE(embedding_dim,0),
+       positive_samples, negative_samples,
+       COALESCE(negative_prototypes_json,'')
+FROM taste_states ORDER BY state_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TasteStateRow
+	for rows.Next() {
+		var row TasteStateRow
+		if err := rows.Scan(
+			&row.Key, &row.PositiveVector, &row.EmbeddingDim,
+			&row.PositiveSamples, &row.NegativeSamples,
+			&row.NegativePrototypesJSON,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+type TasteCentroidRow struct {
+	Index            int
+	Vector           []byte
+	EmbeddingDim     int
+	Mass             float64
+	Label            string
+	SampleCount      int
+	AlgorithmVersion string
+}
+
+func (s *Store) ReplaceTasteCentroids(rows []TasteCentroidRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	version := rows[0].AlgorithmVersion
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`DELETE FROM taste_centroids WHERE algorithm_version=?`, version); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	stmt, err := tx.Prepare(`
+INSERT INTO taste_centroids(
+  idx, vector, embedding_dim, mass, label, sample_count, updated_at, algorithm_version
+) VALUES (?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, row := range rows {
+		if _, err = stmt.Exec(
+			row.Index, row.Vector, row.EmbeddingDim, row.Mass, nullStr(row.Label),
+			row.SampleCount, now, row.AlgorithmVersion,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) LoadTasteCentroids(algorithmVersion string) ([]TasteCentroidRow, error) {
+	rows, err := s.DB.Query(`
+SELECT idx, vector, embedding_dim, mass, COALESCE(label,''), sample_count, algorithm_version
+FROM taste_centroids WHERE algorithm_version=? ORDER BY idx`, algorithmVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TasteCentroidRow
+	for rows.Next() {
+		var row TasteCentroidRow
+		if err := rows.Scan(
+			&row.Index, &row.Vector, &row.EmbeddingDim, &row.Mass,
+			&row.Label, &row.SampleCount, &row.AlgorithmVersion,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+type TasteSampleRow struct {
+	TrackID int64
+	Weight  float64
+	At      time.Time
+}
+
+// PositiveTasteSamples returns algorithmic finished/liked impressions for
+// centroid rebuild. Manual, share, legacy, partial, skip, and unplayed rows
+// are excluded so the long-taste clusters stay on the training boundary.
+func (s *Store) PositiveTasteSamples(limit int) ([]TasteSampleRow, error) {
+	if limit < 1 {
+		limit = 400
+	}
+	rows, err := s.DB.Query(`
+SELECT i.track_id,
+       COALESCE(i.closed_at, i.played_at, i.queued_at),
+       CASE WHEN EXISTS(
+         SELECT 1 FROM listening_history h
+         WHERE h.impression_id=i.impression_id AND h.action='like'
+       ) THEN 2.0 ELSE 1.0 END
+FROM recommendation_impressions i
+WHERE i.legacy=0
+  AND i.source NOT IN ('manual', 'legacy')
+  AND COALESCE(i.mode, '') != 'share'
+  AND (
+    i.outcome='finished'
+    OR EXISTS (
+      SELECT 1 FROM listening_history h
+      WHERE h.impression_id=i.impression_id AND h.action='like'
+    )
+  )
+ORDER BY COALESCE(i.closed_at, i.played_at, i.queued_at) DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TasteSampleRow
+	for rows.Next() {
+		var row TasteSampleRow
+		var at string
+		if err := rows.Scan(&row.TrackID, &at, &row.Weight); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+			row.At = t
+		} else if t, err := time.Parse(time.RFC3339, at); err == nil {
+			row.At = t
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) TopClusters(limit int) ([]ClusterCount, error) {
 	if limit < 1 {
 		limit = 5

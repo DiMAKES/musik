@@ -3,6 +3,11 @@
 Base URL: `http://127.0.0.1:8787`  
 OpenAPI: [`GET /api/openapi.json`](/api/openapi.json) · source [`openapi.yaml`](openapi.yaml)
 
+Документ описывает работающий API v1. Radio current/queue items содержат
+`request_id`, `impression_id` и `source`; события идемпотентны по `event_id`.
+Контексты вкуса, radio rules и пользовательские/smart playlists доступны через
+`/api/contexts`, `/api/rules` и `/api/playlists`.
+
 Content-Type: `application/json` (кроме stream/artwork и `POST /api/library/upload`).
 Все JSON-ошибки используют envelope `{"error":"…","code":"…"}`.
 
@@ -32,25 +37,38 @@ Content-Type: `application/json` (кроме stream/artwork и `POST /api/librar
 |--------|------|----------|
 | GET | `/api/health` | `{ok, version, api_version, auth}` (+ `tracks`, `dim` если auth) |
 | GET | `/api/status` | tracks, maturity, mode, session, explore |
-| GET | `/api/profile` | maturity, signals, top_artists/clusters, confidence |
+| GET | `/api/profile` | maturity, signals, top_artists/clusters, confidence, explore bounds |
+| PUT | `/api/profile/explore` | `{explore_lo, explore_hi}` — UI bounds for gated Thompson sampling |
 | GET | `/api/library` | плоский список треков |
 | GET | `/api/artists` | `{artists, count}` |
 | GET | `/api/albums` | `{albums, count}` |
 | GET | `/api/tracks/{id}` | один трек |
 | GET | `/api/stream/{id}` | оригинал (Range); `?q=mobile|aac|mp3`, alias `?fmt=…` — мобильный transcode |
-| GET | `/api/artwork/{id}` | обложка |
+| GET | `/api/artwork/{id}` | JPEG 96/256/640 (`?w=`, default 640); `?full=1` — оригинал |
 | GET | `/api/similar/{id}` | top-10 cosine |
 | POST | `/api/reload` | перечитать индекс из SQLite |
 | GET | `/api/now` | current + queue (`?session_id=`) |
 | POST | `/api/events` | playback events |
 | POST | `/api/session/start` | `{seed_track_id?}` |
 | POST | `/api/session/jump` | прыжок по индексу в fixed playlist |
+| POST | `/api/session/back` | предыдущий трек в списке или радио |
 | POST | `/api/radio/start` | радио по вкусу (diverse seed) |
 | POST | `/api/share/radio` | создать публичную ссылку на эфир |
 | GET | `/api/share/radio` | список ссылок (`?all=1` — с отозванными) |
 | DELETE | `/api/share/radio/{token}` | отозвать ссылку |
 | GET | `/listen/{token}` · `/listen/{token}.mp3` | непрерывный MP3-эфир (публично, ffmpeg) |
 | POST | `/api/play` | listen: track / artist / album / track_ids |
+| GET/POST | `/api/contexts` | пользовательские mood/place/activity |
+| GET/PATCH/DELETE | `/api/contexts/{id}` | получить, изменить, архивировать |
+| POST | `/api/contexts/{id}/activate` | включить контекст в сессии |
+| POST | `/api/session/contexts` | заменить активные контексты |
+| GET/POST | `/api/rules` | временные block/downrank/cooldown |
+| POST | `/api/rules/undo` | вернуть последнее правило |
+| GET/POST | `/api/playlists` | ручные и smart плейлисты |
+| POST | `/api/playlists/import` | импорт M3U/JSON без server path |
+| GET | `/api/playlists/{id}/export` | экспорт JSON или `?format=m3u` |
+| POST | `/api/playlists/{id}/play` | играть с позиции |
+| POST | `/api/playlists/from-favorites` | скопировать избранное |
 
 ## Mixes & playlists
 
@@ -87,14 +105,18 @@ Content-Type: `application/json` (кроме stream/artwork и `POST /api/librar
 | POST | `/api/library/rescan` | enqueue full_rescan; ответ содержит одинаковые aliases `id` и `job_id` |
 | GET | `/api/discover/albums` | new album tips |
 | GET | `/api/discover/resurfaced` | старый каталог |
-| GET | `/api/metrics/weekly` | skip-rate, listens, diversity |
-| GET | `/api/metrics/recommendations` | p50/p95/p99 latency и explore/exploit outcomes за 7 дней |
+| GET | `/api/metrics/weekly` | outcome/source/daypart/maturity/date за 7 дней, интервалы 95% и готовность baseline |
+| GET | `/api/metrics/recommendations` | 90-дневные outcomes, p50/p95/p99 latency, last_policy, recent_requests, training_runs и состояние explore/bandit |
 
 ## Events `POST /api/events`
 
 ```json
 {
   "type": "track_start|progress|track_end|skip|like|dislike",
+  "event_id": "client-stable-id-for-retries",
+  "impression_id": "128-bit-id-from-current-or-queue",
+  "client_id": "stable-browser-id",
+  "device_id": "Linux x86_64",
   "track_id": 83,
   "session_id": "...",
   "position_sec": 12.5,
@@ -104,22 +126,35 @@ Content-Type: `application/json` (кроме stream/artwork и `POST /api/librar
 }
 ```
 
+Новый radio-клиент обязан вернуть `impression_id` из current/queue и повторять
+тот же `event_id` при retry. Для старых клиентов сервер ищет единственный
+последний pending impression по `(session_id, track_id)`; неоднозначность
+возвращает `409 ambiguous_impression`, а не приписывает feedback случайной
+рекомендации. Повторный start/end/skip не меняет impression или `track_stats`.
+Public share-radio не пишет owner events, transitions, taste или метрики.
+
 Ответ на skip/track_end: `{ok, next, queue, maturity, signed_weight, session_id, …}`.
 
 ## Сессии и вкус
 
 - Каждая вкладка — свой `session_id` из `/api/radio/start`, `/api/play`, `/api/session/start`.
 - Сессии **персистятся в SQLite** (`play_sessions`) и переживают рестарт player.
-- Вкус (`user_profile_snapshots.context = global`) — Go EMA; дополнительно daypart (`morning|afternoon|evening|night`) мягко влияет на очередь (blend 0.7/0.3).
+- Вкус использует отдельные long/daypart/session positive-векторы. Малоданный
+  daypart откатывается к long/session; session state переживает рестарт.
+  Early skip попадает только в session negative prototypes, dislike — в
+  persistent negative prototypes и не вычитается из positive taste.
 - `transitions` участвуют в score очереди аддитивно (`+ λ · norm(log1p(weight))`); без данных поведение как раньше.
-- При N ≥ 8000 очередь строится по candidate pool (кластер + transitions + sample), иначе полный cosine.
+- Радио строит очередь одним ядром `candidates → features → score → select`.
+  Explore-доля сначала статическая; Thompson sampling включается только после
+  минимума разрешённых исходов на каждый exploratory source и остаётся внутри
+  `explore_lo`/`explore_hi`.
 - `offline_report` — Python CLI, не затирает global.
 
 ## Maturity
 
 | maturity | условие | поведение |
 |----------|---------|-----------|
-| `discovering` | n_positive &lt; forming_at (default 3) | random/far, высокий explore |
+| `discovering` | n_positive &lt; forming_at (default 3) | выше explore, больше новых и соседних источников |
 | `forming` | &lt; ready_at (default 8) | смесь |
 | `ready` | ≥ ready_at | вкус + continuity; старт радио — sample из top-K |
 

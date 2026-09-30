@@ -54,6 +54,7 @@ var apiRoutes = []routeDescriptor{
 	{"POST", "/api/auth/logout", (*Server).handleAuthLogout},
 	{"GET", "/api/status", (*Server).handleStatus},
 	{"GET", "/api/profile", (*Server).handleProfile},
+	{"PUT", "/api/profile/explore", (*Server).handleExploreBounds},
 	{"GET", "/api/library", (*Server).handleLibrary},
 	{"GET", "/api/artists", (*Server).handleArtists},
 	{"GET", "/api/albums", (*Server).handleAlbums},
@@ -64,6 +65,7 @@ var apiRoutes = []routeDescriptor{
 	{"POST", "/api/reload", (*Server).handleReload},
 	{"POST", "/api/session/start", (*Server).handleSessionStart},
 	{"POST", "/api/session/jump", (*Server).handleSessionJump},
+	{"POST", "/api/session/back", (*Server).handleSessionBack},
 	{"POST", "/api/radio/start", (*Server).handleRadioStart},
 	{"POST", "/api/share/radio", (*Server).handleShareRadioCreate},
 	{"GET", "/api/share/radio", (*Server).handleShareRadioList},
@@ -96,6 +98,40 @@ var apiRoutes = []routeDescriptor{
 	{"GET", "/api/jobs", (*Server).handleListJobs},
 	{"GET", "/api/metrics/weekly", (*Server).handleWeeklyMetrics},
 	{"GET", "/api/metrics/recommendations", (*Server).handleRecommendationMetrics},
+	{"GET", "/api/contexts", (*Server).handleContextsList},
+	{"POST", "/api/contexts", (*Server).handleContextsCreate},
+	{"GET", "/api/contexts/{id}", (*Server).handleContextGet},
+	{"PATCH", "/api/contexts/{id}", (*Server).handleContextPatch},
+	{"DELETE", "/api/contexts/{id}", (*Server).handleContextDelete},
+	{"POST", "/api/contexts/{id}/activate", (*Server).handleContextActivate},
+	{"POST", "/api/contexts/{id}/deactivate", (*Server).handleContextDeactivate},
+	{"POST", "/api/session/contexts", (*Server).handleSessionContexts},
+	{"GET", "/api/rules", (*Server).handleRulesList},
+	{"POST", "/api/rules", (*Server).handleRulesCreate},
+	{"PATCH", "/api/rules/{id}", (*Server).handleRulePatch},
+	{"DELETE", "/api/rules/{id}", (*Server).handleRuleDelete},
+	{"POST", "/api/rules/undo", (*Server).handleRulesUndo},
+	{"GET", "/api/playlists", (*Server).handlePlaylistsList},
+	{"POST", "/api/playlists", (*Server).handlePlaylistsCreate},
+	{"POST", "/api/playlists/import", (*Server).handlePlaylistImport},
+	{"POST", "/api/playlists/preview", (*Server).handlePlaylistPreview},
+	{"POST", "/api/playlists/from-favorites", (*Server).handlePlaylistFromFavorites},
+	{"POST", "/api/playlists/from-later", (*Server).handlePlaylistFromLater},
+	{"GET", "/api/playlists/{id}", (*Server).handlePlaylistGet},
+	{"PATCH", "/api/playlists/{id}", (*Server).handlePlaylistPatch},
+	{"DELETE", "/api/playlists/{id}", (*Server).handlePlaylistDelete},
+	{"POST", "/api/playlists/{id}/tracks", (*Server).handlePlaylistAddTrack},
+	{"DELETE", "/api/playlists/{id}/tracks/{item_id}", (*Server).handlePlaylistRemoveTrack},
+	{"POST", "/api/playlists/{id}/reorder", (*Server).handlePlaylistReorder},
+	{"POST", "/api/playlists/{id}/duplicate", (*Server).handlePlaylistDuplicate},
+	{"POST", "/api/playlists/{id}/from-queue", (*Server).handlePlaylistFromQueue},
+	{"POST", "/api/playlists/{id}/play", (*Server).handlePlaylistPlay},
+	{"POST", "/api/playlists/{id}/radio", (*Server).handlePlaylistRadio},
+	{"GET", "/api/playlists/{id}/export", (*Server).handlePlaylistExport},
+	{"GET", "/api/tags", (*Server).handleTagsList},
+	{"POST", "/api/tags", (*Server).handleTagsCreate},
+	{"POST", "/api/tags/{id}/tracks", (*Server).handleTagAddTrack},
+	{"DELETE", "/api/tags/{id}/tracks", (*Server).handleTagRemoveTrack},
 	{"GET", "/manifest.webmanifest", (*Server).handleManifest},
 }
 
@@ -164,5 +200,6 @@ func (s *Server) Handler() http.Handler {
 	if s.Auth != nil {
 		h = s.Auth.Middleware(h)
 	}
+	h = withGzip(h)
 	return withCORS(h, s.Cfg.CORSOrigins)
 }

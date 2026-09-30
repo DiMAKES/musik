@@ -14,8 +14,11 @@ func artworkURL(id int64, has bool) string {
 	return "/api/artwork/" + strconv.FormatInt(id, 10)
 }
 
-func (s *Server) handleArtists(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleArtists(w http.ResponseWriter, r *http.Request) {
 	groups := library.GroupArtists(s.Idx)
+	if limit := queryLimit(r, 0, 500); limit > 0 && len(groups) > limit {
+		groups = groups[:limit]
+	}
 	type row struct {
 		Artist       string `json:"artist"`
 		Tracks       int    `json:"tracks"`
@@ -32,8 +35,11 @@ func (s *Server) handleArtists(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"artists": out, "count": len(out)})
 }
 
-func (s *Server) handleAlbums(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleAlbums(w http.ResponseWriter, r *http.Request) {
 	groups := library.GroupAlbums(s.Idx)
+	if limit := queryLimit(r, 0, 500); limit > 0 && len(groups) > limit {
+		groups = groups[:limit]
+	}
 	type row struct {
 		Artist       string `json:"artist"`
 		Album        string `json:"album"`

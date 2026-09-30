@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"math"
 	"testing"
 
 	"github.com/torwin-job/musik/player/internal/config"
@@ -10,32 +9,18 @@ import (
 )
 
 func TestTransitionNormMonotonic(t *testing.T) {
-	maxTW := 10.0
-	norm := func(w float64) float32 {
-		if w <= 0 || maxTW <= 0 {
-			return 0
-		}
-		return float32(math.Log1p(w) / math.Log1p(maxTW))
-	}
-	a := norm(1)
-	b := norm(5)
-	c := norm(10)
+	weights := map[int64]float64{1: 1, 2: 5, 3: 10}
+	a := normTransition(1, weights)
+	b := normTransition(5, weights)
+	c := normTransition(10, weights)
 	if !(a < b && b <= c) {
 		t.Fatalf("expected monotonic norms got %v %v %v", a, b, c)
 	}
 	if c > 1.01 {
 		t.Fatalf("norm at max should be ~1 got %v", c)
 	}
-	old := float32(0.55*0.9 + 0.35*0.8)
-	with := old + transitionLambda*norm(5)
-	if with <= old {
-		t.Fatal("transition boost should increase score")
-	}
-}
-
-func TestCandidatePoolThreshold(t *testing.T) {
-	if transitionLambda <= 0 {
-		t.Fatal("lambda")
+	if normTransition(0, weights) != 0 {
+		t.Fatal("zero weight should stay zero")
 	}
 }
 
@@ -64,7 +49,7 @@ func TestBuildReturnsDistinctQueue(t *testing.T) {
 	b := testBuilder(t)
 	taste := []float32{1, 0}
 	index.Normalize(taste)
-	items := b.BuildOpts(1, taste, map[int64]bool{1: true}, BuildOpts{Size: 5, ExploreRatio: 0.2})
+	items := b.BuildCore(CoreOpts{CurrentID: 1, Taste: taste, Exclude: map[int64]bool{1: true}, Size: 5})
 	if len(items) == 0 {
 		t.Fatal("expected queue items")
 	}
@@ -80,7 +65,7 @@ func TestBuildReturnsDistinctQueue(t *testing.T) {
 			t.Fatalf("duplicate track %d in queue", item.TrackID)
 		}
 		seen[item.TrackID] = true
-		if item.Artist == "" || item.Title == "" {
+		if item.Artist == "" || item.Title == "" || item.Source == "" || item.FeaturesJSON == "" {
 			t.Fatalf("incomplete item: %+v", item)
 		}
 	}
@@ -89,10 +74,9 @@ func TestBuildReturnsDistinctQueue(t *testing.T) {
 func TestBuildHonorsExcludeAndTransitions(t *testing.T) {
 	b := testBuilder(t)
 	exclude := map[int64]bool{1: true, 2: true, 3: true}
-	items := b.BuildOpts(1, []float32{1, 0}, exclude, BuildOpts{
-		Size:            4,
-		ExploreRatio:    0.25,
-		TransitionsFrom: map[int64]float64{10: 20, 11: 5},
+	items := b.BuildCore(CoreOpts{
+		CurrentID: 1, Taste: []float32{1, 0}, Exclude: exclude, Size: 4,
+		Transitions: map[int64]float64{10: 20, 11: 5},
 	})
 	for _, item := range items {
 		if exclude[item.TrackID] {

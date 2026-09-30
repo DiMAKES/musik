@@ -59,6 +59,23 @@ func (s *Server) sessionTracks(sess *playback.Session) []any {
 	return out
 }
 
+func (s *Server) sessionCurrentJSON(sess *playback.Session) any {
+	if sess == nil {
+		return nil
+	}
+	raw := s.trackJSON(sess.Current)
+	track, ok := raw.(map[string]any)
+	if !ok || track == nil {
+		return raw
+	}
+	if sess.CurrentItem.ImpressionID != "" && sess.CurrentItem.TrackID == sess.Current {
+		track["impression_id"] = sess.CurrentItem.ImpressionID
+		track["request_id"] = sess.CurrentItem.RequestID
+		track["source"] = sess.CurrentItem.Source
+	}
+	return track
+}
+
 func (s *Server) playResponse(sess *playback.Session) map[string]any {
 	return map[string]any{
 		"session_id": sess.ID,
@@ -67,7 +84,7 @@ func (s *Server) playResponse(sess *playback.Session) map[string]any {
 		"name":       sess.PlaylistName,
 		"index":      sess.DailyPos,
 		"count":      len(sess.DailyIDs),
-		"current":    s.trackJSON(sess.Current),
+		"current":    s.sessionCurrentJSON(sess),
 		"queue":      sess.Queue,
 		"tracks":     s.sessionTracks(sess),
 		"fixed":      playback.IsFixedMode(sess.Mode),
@@ -79,7 +96,7 @@ func (s *Server) sessionStartResponse(sess *playback.Session) map[string]any {
 		"session_id": sess.ID,
 		"mode":       sess.Mode,
 		"maturity":   s.Play.Maturity(),
-		"current":    s.trackJSON(sess.Current),
+		"current":    s.sessionCurrentJSON(sess),
 		"queue":      sess.Queue,
 	}
 }

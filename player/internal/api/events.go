@@ -20,6 +20,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	sess.Lock()
 	defer sess.Unlock()
 	res := s.Play.ApplyEvent(sess, ev)
+	if res.Error != "" {
+		status := http.StatusInternalServerError
+		code := "event"
+		if res.Conflict {
+			status = http.StatusConflict
+			code = "ambiguous_impression"
+		}
+		writeErr(w, status, code, res.Error)
+		return
+	}
 	if res.Unknown {
 		writeErr(w, 400, "unknown_event", "unknown event type")
 		return
@@ -27,7 +37,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if res.IsEnd {
 		var next any
 		if res.NextID != 0 {
-			next = s.trackJSON(res.NextID)
+			next = s.sessionCurrentJSON(sess)
 		}
 		out := map[string]any{
 			"ok": true, "signed_weight": res.SignedWeight,

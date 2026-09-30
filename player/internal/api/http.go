@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,7 +37,7 @@ func withCORS(next http.Handler, allowed []string) http.Handler {
 			}
 		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return
@@ -76,6 +78,7 @@ func (s *Server) staticHandler() http.Handler {
 	}
 	fileServer := http.FileServer(s.Static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setStaticCacheControl(w, r.URL.Path)
 		if r.URL.Path == "/" || r.URL.Path == "" {
 			f, err := s.Static.Open("index.html")
 			if err != nil {
@@ -100,6 +103,24 @@ func (s *Server) staticHandler() http.Handler {
 		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+func setStaticCacheControl(w http.ResponseWriter, path string) {
+	if cc := staticCacheControl(path); cc != "" {
+		w.Header().Set("Cache-Control", cc)
+	}
+}
+
+func staticCacheControl(path string) string {
+	if strings.HasPrefix(path, "/fonts/") && strings.HasSuffix(strings.ToLower(path), ".woff2") {
+		return "public, max-age=31536000, immutable"
+	}
+	switch path {
+	case "/", "", "/index.html", "/app.js", "/style.css", "/fonts.css":
+		return "public, max-age=3600"
+	default:
+		return ""
+	}
 }
 
 func modTime(info fs.FileInfo) time.Time {
@@ -131,6 +152,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"maturity":         mat,
 		"sessions":         sessionCount,
 		"explore":          explore,
+		"explore_lo":       s.exploreState()["explore_lo"],
+		"explore_hi":       s.exploreState()["explore_hi"],
+		"model_version":    s.Play.Ranker.ModelVersion,
 		"db":               s.Cfg.DBPath,
 		"worker_url":       s.Cfg.WorkerURL,
 		"worker_autostart": s.Cfg.WorkerAutostart,
@@ -187,4 +211,22 @@ func contentType(path string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+func queryLimit(r *http.Request, fallback, max int) int {
+	if r == nil {
+		return fallback
+	}
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	if max > 0 && n > max {
+		return max
+	}
+	return n
 }

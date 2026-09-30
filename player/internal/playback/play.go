@@ -3,6 +3,9 @@ package playback
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/torwin-job/musik/player/internal/queue"
 )
 
 type PlaySpec struct {
@@ -107,6 +110,7 @@ func (e *Engine) StartFixed(ids []int64, mode, name, kind string, startIndex int
 	sess.PlaylistName = name
 	sess.PlaylistKind = kind
 	sess.Current = ids[pos]
+	sess.CurrentItem = queue.Item{}
 	e.ExcludeTrack(sess, sess.Current)
 	e.RebuildFixedQueue(sess)
 	sess.Unlock()
@@ -115,27 +119,132 @@ func (e *Engine) StartFixed(ids []int64, mode, name, kind string, startIndex int
 }
 
 func (e *Engine) Jump(sess *Session, index *int, trackID int64) error {
-	if len(sess.DailyIDs) == 0 {
-		return fmt.Errorf("нечего переключать — это не плейлист")
-	}
-	pos := -1
-	if index != nil {
-		pos = *index
-	} else if trackID != 0 {
-		for i, id := range sess.DailyIDs {
-			if id == trackID {
-				pos = i
-				break
+	if len(sess.DailyIDs) > 0 {
+		pos := -1
+		if trackID != 0 {
+			for i, id := range sess.DailyIDs {
+				if id == trackID {
+					pos = i
+					break
+				}
 			}
 		}
+		if pos < 0 && index != nil {
+			pos = *index
+		}
+		if pos < 0 || pos >= len(sess.DailyIDs) {
+			return fmt.Errorf("track not in playlist")
+		}
+		sess.DailyPos = pos
+		sess.Current = sess.DailyIDs[pos]
+		sess.CurrentItem = queue.Item{}
+		e.ExcludeTrack(sess, sess.Current)
+		e.RebuildFixedQueue(sess)
+		return nil
 	}
-	if pos < 0 || pos >= len(sess.DailyIDs) {
-		return fmt.Errorf("track not in playlist")
+	if trackID == 0 && index != nil && *index >= 0 && *index < len(sess.Queue) {
+		trackID = sess.Queue[*index].TrackID
 	}
-	sess.DailyPos = pos
-	sess.Current = sess.DailyIDs[pos]
+	pos := -1
+	for i, item := range sess.Queue {
+		if item.TrackID == trackID {
+			pos = i
+			break
+		}
+	}
+	if trackID == 0 || pos < 0 {
+		return fmt.Errorf("track not in queue")
+	}
+	item := sess.Queue[pos]
+	if item.TrackID != sess.Current {
+		e.rememberBack(sess)
+	}
+	sess.Prev = sess.Current
+	sess.Current = item.TrackID
+	sess.CurrentItem = item
+	sess.Queue = append([]queue.Item(nil), sess.Queue[pos+1:]...)
 	e.ExcludeTrack(sess, sess.Current)
-	e.RebuildFixedQueue(sess)
+	if len(sess.Queue) < e.Cfg.QueueSize/2 {
+		e.RefreshQueue(sess, sess.Current, "jump")
+		return nil
+	}
+	sess.UpdatedAt = time.Now()
+	e.persistLocked(sess)
+	e.warm(sess)
+	return nil
+}
+
+func (e *Engine) rememberBack(sess *Session) {
+	if sess.Current == 0 {
+		return
+	}
+	item := sess.CurrentItem
+	if item.TrackID != sess.Current {
+		item = e.trackItem(sess.Current)
+	}
+	if n := len(sess.BackStack); n > 0 && sess.BackStack[n-1].TrackID == item.TrackID {
+		return
+	}
+	sess.BackStack = append(sess.BackStack, item)
+	if len(sess.BackStack) > 40 {
+		sess.BackStack = append([]queue.Item(nil), sess.BackStack[len(sess.BackStack)-40:]...)
+	}
+}
+
+func (e *Engine) trackItem(id int64) queue.Item {
+	row, ok := e.Idx.RowOf(id)
+	if !ok {
+		return queue.Item{TrackID: id}
+	}
+	m := e.Idx.MetaAt(row)
+	return queue.Item{
+		TrackID: m.ID, Artist: m.Artist, Title: m.Title, Album: m.Album,
+		Path: m.Path, Duration: m.Duration,
+	}
+}
+
+// Back restarts the previous track. In a fixed list that is the previous
+// position. In radio it restores the track we just left and puts the current
+// one back at the front of the queue.
+func (e *Engine) Back(sess *Session) error {
+	if len(sess.DailyIDs) > 0 {
+		if sess.DailyPos <= 0 {
+			return fmt.Errorf("нет предыдущего трека")
+		}
+		sess.DailyPos--
+		sess.Current = sess.DailyIDs[sess.DailyPos]
+		sess.Prev = 0
+		if sess.DailyPos > 0 {
+			sess.Prev = sess.DailyIDs[sess.DailyPos-1]
+		}
+		sess.CurrentItem = queue.Item{}
+		e.ExcludeTrack(sess, sess.Current)
+		e.RebuildFixedQueue(sess)
+		e.createCurrentImpression(sess, "back", "back")
+		return nil
+	}
+	if len(sess.BackStack) == 0 {
+		return fmt.Errorf("нет предыдущего трека")
+	}
+	prev := sess.BackStack[len(sess.BackStack)-1]
+	sess.BackStack = sess.BackStack[:len(sess.BackStack)-1]
+	cur := sess.CurrentItem
+	if cur.TrackID != sess.Current {
+		cur = e.trackItem(sess.Current)
+	}
+	if cur.TrackID != 0 && (len(sess.Queue) == 0 || sess.Queue[0].TrackID != cur.TrackID) {
+		sess.Queue = append([]queue.Item{cur}, sess.Queue...)
+	}
+	sess.Prev = 0
+	if n := len(sess.BackStack); n > 0 {
+		sess.Prev = sess.BackStack[n-1].TrackID
+	}
+	sess.Current = prev.TrackID
+	sess.CurrentItem = prev
+	e.createCurrentImpression(sess, "back", "back")
+	sess.UpdatedAt = time.Now()
+	e.persistLocked(sess)
+	e.warm(sess)
 	return nil
 }
 
@@ -147,7 +256,12 @@ func (e *Engine) StartRadio(seed *int64) *Session {
 	sess.Current = startID
 	sess.Prev = 0
 	e.ExcludeTrack(sess, startID)
-	e.RefreshQueue(sess, startID, true)
+	source := "radio_start"
+	if seed != nil {
+		source = "manual"
+	}
+	e.createCurrentImpression(sess, source, "radio_start")
+	e.RefreshQueue(sess, startID, "radio_start")
 	sess.Unlock()
 	return sess
 }
@@ -158,7 +272,12 @@ func (e *Engine) StartSession(seed *int64) *Session {
 	startID := e.PickStart(sess, seed)
 	sess.Current = startID
 	sess.Prev = 0
-	e.RefreshQueue(sess, startID, true)
+	source := "radio_start"
+	if seed != nil {
+		source = "manual"
+	}
+	e.createCurrentImpression(sess, source, "radio_start")
+	e.RefreshQueue(sess, startID, "radio_start")
 	sess.Unlock()
 	return sess
 }

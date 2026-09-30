@@ -264,25 +264,10 @@ def connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-_MIGRATIONS = (
-    "ALTER TABLE listening_history ADD COLUMN listened_sec REAL",
-    "ALTER TABLE listening_history ADD COLUMN session_id TEXT",
-    "ALTER TABLE listening_history ADD COLUMN reason TEXT",
-)
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    for sql in _MIGRATIONS:
-        try:
-            conn.execute(sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
-
-
 def init_db(db_path: Path | None = None) -> None:
-    with connect(db_path) as conn:
-        conn.executescript(SCHEMA)
-        _migrate(conn)
+    from musik.db.migrations import migrate_db
+
+    migrate_db(db_path or get_settings().db_path)
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

@@ -101,10 +101,38 @@ func TestRadioStartRecordsImpressions(t *testing.T) {
 		{ID: 2, Artist: "Portishead", Album: "Dummy", Title: "Glory Box", Embedding: index.Float32Bytes([]float32{0.9, 0.1}), Dim: 2},
 		{ID: 3, Artist: "Bjork", Album: "Homogenic", Title: "Joga", Embedding: index.Float32Bytes([]float32{0, 1}), Dim: 2},
 	})
+	for _, id := range []int64{1, 2, 3} {
+		if _, err := server.Store.DB.Exec(
+			`INSERT OR IGNORE INTO tracks(id, path, title) VALUES (?, ?, ?)`,
+			id, "/t.flac", "T",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	rec := serve(server, jsonReq("POST", "/api/radio/start", `{}`))
 	if rec.Code != 200 {
 		t.Fatalf("radio status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var started struct {
+		SessionID string `json:"session_id"`
+		Current   struct {
+			ID           int64  `json:"id"`
+			ImpressionID string `json:"impression_id"`
+			Source       string `json:"source"`
+		} `json:"current"`
+		Queue []struct {
+			ImpressionID string `json:"impression_id"`
+		} `json:"queue"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Current.ImpressionID == "" || started.Current.Source == "" {
+		t.Fatalf("current missing impression: %+v", started.Current)
+	}
+	if len(started.Queue) == 0 || started.Queue[0].ImpressionID == "" {
+		t.Fatalf("queue missing impression: %+v", started.Queue)
 	}
 	flush(server)
 
@@ -114,5 +142,33 @@ func TestRadioStartRecordsImpressions(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatal("radio queue refresh should persist recommendation impressions")
+	}
+}
+
+func TestAmbiguousImpressionFallbackConflicts(t *testing.T) {
+	server := openTestServer(t)
+	rec := serve(server, jsonReq("POST", "/api/radio/start", `{"seed_track_id":11}`))
+	var started struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	flush(server)
+	for i := 0; i < 2; i++ {
+		if err := server.Store.CreateRecommendationRequest(db.RecommendationRequest{
+			RequestID: db.NewID(), SessionID: started.SessionID, Reason: "refill",
+			PolicyVersion: "test", CandidateCount: 1,
+		}, []db.RecommendationImpression{{
+			ImpressionID: db.NewID(), SessionID: started.SessionID, TrackID: 11,
+			Source: "exploit",
+		}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec = serve(server, jsonReq("POST", "/api/events",
+		`{"type":"track_start","event_id":"amb-1","track_id":11,"session_id":"`+started.SessionID+`"}`))
+	if rec.Code != 409 {
+		t.Fatalf("ambiguous fallback status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

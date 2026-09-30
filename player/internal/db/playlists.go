@@ -25,15 +25,16 @@ type Playlist struct {
 	Tracks    []PlaylistTrack `json:"tracks"`
 }
 
-func (s *Store) PlaylistMeta(kind string) (id int64, name string, n int, err error) {
+func (s *Store) PlaylistMeta(kind string) (id int64, name string, n int, coverID int64, createdAt string, err error) {
 	err = s.DB.QueryRow(`
-SELECT p.id, p.name,
-  (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id)
+SELECT p.id, p.name, p.created_at,
+  (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id),
+  COALESCE((SELECT pt.track_id FROM playlist_tracks pt WHERE pt.playlist_id = p.id ORDER BY pt.position ASC LIMIT 1), 0)
 FROM playlists p
 WHERE p.kind = ?
-ORDER BY p.id DESC LIMIT 1`, kind).Scan(&id, &name, &n)
+ORDER BY p.id DESC LIMIT 1`, kind).Scan(&id, &name, &createdAt, &n, &coverID)
 	if err == sql.ErrNoRows {
-		return 0, "", 0, nil
+		return 0, "", 0, 0, "", nil
 	}
 	return
 }

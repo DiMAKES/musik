@@ -10,6 +10,7 @@ from typing import Any
 
 from musik.brain.generators import generate_daily
 from musik.brain.mixes import generate_mix_pack
+from musik.brain.train_ranker import train_ranker
 from musik.config import get_settings
 from musik.discover.albums import rebuild_discover_tips
 from musik.embed import embed_library
@@ -20,12 +21,21 @@ from musik.scanner import scan_library
 log = logging.getLogger(__name__)
 
 JOB_KINDS = frozenset(
-    {"scan", "embed", "clusters", "daily", "album_tips", "full_rescan", "mix_pack"}
+    {
+        "scan",
+        "embed",
+        "clusters",
+        "daily",
+        "album_tips",
+        "full_rescan",
+        "mix_pack",
+        "train_ranker",
+    }
 )
 
 # After these jobs the Go player should reload its in-memory matrix / tips.
 _RELOAD_KINDS = frozenset(
-    {"embed", "full_rescan", "clusters", "daily", "album_tips", "mix_pack"}
+    {"embed", "full_rescan", "clusters", "daily", "album_tips", "mix_pack", "train_ranker"}
 )
 
 
@@ -160,6 +170,10 @@ def _run_mix_pack(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _run_train_ranker(payload: dict[str, Any]) -> dict[str, Any]:
+    return train_ranker(force=bool(payload.get("force", False)))
+
+
 def _run_album_tips(payload: dict[str, Any]) -> dict[str, Any]:
     return rebuild_discover_tips(
         new_album_days=int(payload.get("new_album_days", 14)),
@@ -210,6 +224,8 @@ def process_job(job: dict[str, Any]) -> dict[str, Any]:
         return _run_album_tips(payload)
     if kind == "full_rescan":
         return _run_full_rescan(payload, job_id=job_id)
+    if kind == "train_ranker":
+        return _run_train_ranker(payload)
     raise ValueError(f"unknown job kind: {kind}")
 
 

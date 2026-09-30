@@ -7,7 +7,7 @@ func (e *Engine) StartShare() *Session {
 	startID := e.PickStart(sess, nil)
 	sess.Current = startID
 	e.ExcludeTrack(sess, startID)
-	e.RefreshQueue(sess, startID, false)
+	e.RefreshQueue(sess, startID, "")
 	sess.Unlock()
 	return sess
 }
@@ -40,6 +40,6 @@ func (e *Engine) AdvanceShare(sess *Session) int64 {
 	sess.Mode = "share"
 	sess.Current = next
 	e.ExcludeTrack(sess, next)
-	e.RefreshQueue(sess, next, false)
+	e.RefreshQueue(sess, next, "")
 	return next
 }

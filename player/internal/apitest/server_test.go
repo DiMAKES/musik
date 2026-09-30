@@ -2,10 +2,8 @@ package apitest
 
 import (
 	"bytes"
-	"database/sql"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -15,54 +13,14 @@ import (
 	"github.com/torwin-job/musik/player/internal/index"
 	"github.com/torwin-job/musik/player/internal/media"
 	"github.com/torwin-job/musik/player/internal/taste"
+	"github.com/torwin-job/musik/player/internal/testdb"
 )
 
 func openTestServer(t *testing.T) *api.Server {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "db", "musik-api-test.db")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bootstrap, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{
-		`CREATE TABLE tracks (
-			id INTEGER PRIMARY KEY, path TEXT NOT NULL DEFAULT '',
-			title TEXT, artist TEXT, album TEXT, duration REAL,
-			file_md5 TEXT, created_at TEXT,
-			is_active INTEGER NOT NULL DEFAULT 1,
-			is_duplicate_of INTEGER,
-			artwork_path TEXT
-		)`,
-		`CREATE TABLE features (
-			track_id INTEGER PRIMARY KEY,
-			status TEXT,
-			cluster_id INTEGER,
-			embedding BLOB,
-			embedding_dim INTEGER
-		)`,
-		`CREATE TABLE listening_history (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL,
-			ts TEXT NOT NULL, source TEXT, action TEXT NOT NULL,
-			daypart TEXT, weekday INTEGER, position_sec REAL, duration_sec REAL
-		)`,
-		`CREATE TABLE playlists (
-			id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE playlist_tracks (
-			playlist_id INTEGER NOT NULL, position INTEGER NOT NULL,
-			track_id INTEGER NOT NULL, explanation TEXT
-		)`,
-	} {
-		if _, err := bootstrap.Exec(statement); err != nil {
-			_ = bootstrap.Close()
-			t.Fatalf("create test schema: %v", err)
-		}
-	}
-	if err := bootstrap.Close(); err != nil {
+	if err := testdb.Create(path); err != nil {
 		t.Fatal(err)
 	}
 	store, err := db.Open(path)

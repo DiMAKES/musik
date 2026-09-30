@@ -5,10 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#1a120c" />
   <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
   <title>musik</title>
+  <link rel="stylesheet" href="/fonts.css" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -33,6 +31,7 @@
         <button type="button" class="tab active" data-view="home" aria-current="page">Главная</button>
         <button type="button" class="tab" data-view="player">Сейчас</button>
         <button type="button" class="tab" data-view="library">Библиотека</button>
+        <button type="button" class="tab" data-view="collections">Плейлисты</button>
         <button type="button" class="tab" data-view="profile">Профиль</button>
         <button type="button" class="tab" data-view="upload">Загрузка</button>
         <button type="button" class="tab logout-tab" id="btn-logout" title="Выйти из аккаунта" hidden>Выйти</button>
@@ -48,7 +47,7 @@
             <p>Запусти персональное радио или выбери настроение из коллекции ниже.</p>
           </div>
           <div class="home-actions">
-            <button type="button" class="btn primary hero-play" id="btn-radio"><span aria-hidden="true">▶</span> Запустить радио</button>
+            <button type="button" class="btn primary hero-play" id="btn-radio"><svg class="glyph" viewBox="8.75 5.5 10 13" width="12" height="16" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg>Запустить радио</button>
             <button type="button" class="btn" id="btn-share-radio" title="Ссылка для VLC, браузера или телефона">Поделиться</button>
             <button type="button" class="btn quiet" id="btn-refresh-mixes">
               <span id="refresh-label">Обновить миксы</span>
@@ -200,9 +199,13 @@
         <div class="now-stage">
           <div class="now-art" id="art">
             <div class="art-fallback" id="art-fallback">♪</div>
+            <img id="art-img" alt="" width="640" height="640" decoding="async">
           </div>
           <div class="now-meta">
-            <div class="label" id="mode-label">ничего не играет</div>
+            <div class="now-kicker">
+              <div class="label" id="mode-label">ничего не играет</div>
+              <span id="now-source" class="tag" hidden></span>
+            </div>
             <h2 id="title">Выбери микс</h2>
             <p id="artist">или запусти радио на главной</p>
 
@@ -217,18 +220,28 @@
             <audio id="audio" preload="metadata"></audio>
 
             <div class="transport">
-              <button type="button" class="icon-btn" id="btn-later" title="В «Потом»">◷</button>
-              <button type="button" class="icon-btn" id="btn-dislike" title="Dislike">✕</button>
-              <button type="button" class="icon-btn play-btn" id="btn-play" title="Play/Pause">▶</button>
-              <button type="button" class="icon-btn primary-icon" id="btn-skip" title="Skip">⏭</button>
-              <button type="button" class="icon-btn" id="btn-like" title="Любимая песня">♥</button>
+              <div class="transport-btns">
+                <button type="button" class="icon-btn" id="btn-later" title="В «Потом»">◷</button>
+                <button type="button" class="icon-btn" id="btn-dislike" title="Dislike">✕</button>
+                <button type="button" class="icon-btn" id="btn-back" title="Назад"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M5.6 5.2h2.2v13.6H5.6zm11.6.3v13.6L8.4 12z"/></svg></button>
+                <button type="button" class="icon-btn play-btn" id="btn-play" title="Play/Pause"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg></button>
+                <button type="button" class="icon-btn primary-icon" id="btn-skip" title="Skip">⏭</button>
+                <button type="button" class="icon-btn" id="btn-like" title="Любимая песня">♥</button>
+              </div>
+              <div class="volume-row">
+                <button type="button" class="icon-btn sm" id="btn-mute" title="Звук" aria-label="Звук"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.5 9.2h3.4L12.2 5v14l-4.3-4.2H4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M16 9.2a4.2 4.2 0 0 1 0 5.6M18.2 7a7 7 0 0 1 0 10"/></svg></button>
+                <input class="slider" id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Громкость">
+              </div>
             </div>
             <div class="fav-extra">
               <button type="button" class="chip" id="btn-fav-artist">♥ артист</button>
               <button type="button" class="chip" id="btn-fav-album">♥ альбом</button>
               <button type="button" class="chip" id="btn-similar-now">похожее</button>
+              <button type="button" class="chip" id="btn-hide-track">скрыть трек</button>
+              <button type="button" class="chip" id="btn-hide-artist">скрыть артиста</button>
+              <button type="button" class="chip" id="btn-add-pl">в плейлист</button>
             </div>
-            <p class="hint-keys">Пробел — play/pause · N — skip · L — любимая песня</p>
+            <p class="hint-keys">Пробел — play/pause · B — назад · N — skip · L — любимая песня</p>
             <details class="lyrics-box" id="lyrics-box">
               <summary>Текст песни</summary>
               <pre id="lyrics-text" class="lyrics-text">—</pre>
@@ -237,11 +250,14 @@
         </div>
         <div class="queue-panel">
           <div class="queue-head">
-            <div class="label" id="playlist-label">плейлист</div>
+            <div>
+              <div class="label" id="playlist-label">Дальше</div>
+              <p class="sub" id="queue-hint">Нажми песню — сразу она</p>
+            </div>
             <span class="shelf-hint" id="queue-count"></span>
           </div>
           <ol id="playlist" class="playlist"></ol>
-          <ol id="queue" class="queue-fallback" hidden></ol>
+          <ol id="queue" class="playlist" hidden></ol>
         </div>
       </section>
 
@@ -254,19 +270,61 @@
           <button type="button" class="seg-btn" data-lib="albums">Альбомы</button>
           <button type="button" class="seg-btn" data-lib="favorites">Избранное</button>
         </div>
-        <input id="lib-filter" type="search" placeholder="Поиск…" autocomplete="off" />
+        <div class="lib-tools">
+          <input id="lib-filter" type="search" placeholder="Поиск…" autocomplete="off" />
+          <select id="lib-sort" aria-label="Сортировка"></select>
+        </div>
         <ul id="lib-list" class="track-list"></ul>
         <div id="lib-grid" class="lib-grid" hidden></div>
       </section>
 
+      <section id="view-collections" class="view">
+        <h1 class="page-title">Плейлисты</h1>
+        <p class="sub">Придумай название, потом добавь песни поиском — как в обычном плеере.</p>
+
+        <div class="panel pl-create">
+          <label class="sr-only" for="pl-name">Название плейлиста</label>
+          <div class="pl-create-row">
+            <input id="pl-name" type="text" placeholder="Название, например «В дорогу»" autocomplete="off" />
+            <button type="button" class="btn primary" id="btn-pl-create">Создать</button>
+          </div>
+          <div class="pl-quick">
+            <button type="button" class="pl-quick-card" id="btn-pl-from-lib">
+              <strong>Из библиотеки</strong>
+              <span>Артисты, альбомы и треки</span>
+            </button>
+            <button type="button" class="pl-quick-card" id="btn-pl-from-fav">
+              <strong>Из любимых</strong>
+              <span>Скопировать всё с сердечком</span>
+            </button>
+            <button type="button" class="pl-quick-card" id="btn-pl-from-later">
+              <strong>Из «Потом»</strong>
+              <span>Что отложил на потом</span>
+            </button>
+            <button type="button" class="pl-quick-card" id="btn-pl-import">
+              <strong>Из файла</strong>
+              <span>M3U или список из другого плеера</span>
+            </button>
+          </div>
+          <input id="pl-import-file" type="file" accept=".m3u,.m3u8,.json,text/plain,application/json" hidden />
+        </div>
+
+        <h2 class="pl-section-title">Твои плейлисты</h2>
+        <div id="pl-list" class="pl-grid"></div>
+        <div id="pl-detail" class="panel pl-detail" hidden></div>
+      </section>
+
       <section id="view-profile" class="view">
         <h1 class="page-title">Профиль</h1>
-        <p class="sub">Вкус растёт вместе со слушанием</p>
+        <p class="sub">Как радио тебя знает и что ставит дальше</p>
         <div id="profile-box" class="panel"></div>
-        <div id="metrics-box" class="panel"></div>
+        <div id="monitor-box" class="panel monitor-panel"></div>
+        <div id="contexts-box" class="panel"></div>
+        <div id="rules-box" class="panel"></div>
         <div class="panel" id="share-box">
-          <strong>Публичное радио</strong>
-          <p class="sub share-description">Непрерывный MP3-поток для VLC и любых плееров. Слушатели не меняют твой вкус.</p>
+          <div class="panel-kicker">поделиться</div>
+          <strong>Ссылка на радио</strong>
+          <p class="sub share-description">Откроется в VLC, браузере или на телефоне. Слушатели не меняют твой вкус.</p>
           <button type="button" class="btn" id="btn-share-radio-profile">Создать ссылку</button>
           <ul id="share-list" class="share-list"></ul>
         </div>
@@ -280,8 +338,8 @@
         <input id="upload-files" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,audio/*" multiple hidden />
         <input id="upload-folder" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,audio/*" webkitdirectory directory multiple hidden />
         <div class="dropzone" id="upload-drop" tabindex="0">
-          <span class="upload-card-kicker">Drag and drop</span>
-          <strong>Брось сюда музыку</strong>
+          <span class="upload-card-kicker">Перетащи сюда</span>
+          <strong>Брось музыку</strong>
           <span>Один трек, пачка файлов или целая папка. Структура альбома сохранится.</span>
         </div>
         <div class="upload-grid">
@@ -314,8 +372,8 @@
         <section class="jobs-panel" aria-labelledby="jobs-title">
           <div class="jobs-head">
             <div>
-              <span class="upload-card-kicker">Background queue</span>
-              <h2 id="jobs-title">Фоновые задачи</h2>
+              <span class="upload-card-kicker">В фоне</span>
+              <h2 id="jobs-title">Что делается на сервере</h2>
             </div>
             <span class="jobs-badge" id="jobs-badge">—</span>
           </div>
@@ -329,17 +387,30 @@
 
     <footer class="mini-player" id="mini" hidden>
       <button type="button" class="mini-main" id="mini-open">
-        <div class="mini-art" id="mini-art"></div>
+        <div class="mini-art" id="mini-art">
+          <img id="mini-art-img" alt="" width="96" height="96" decoding="async">
+        </div>
         <div class="mini-text">
           <strong id="mini-title">—</strong>
           <span id="mini-artist">—</span>
         </div>
       </button>
-      <button type="button" class="icon-btn sm" id="mini-play" title="Play/Pause">▶</button>
+      <button type="button" class="icon-btn sm" id="mini-back" title="Назад"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M5.6 5.2h2.2v13.6H5.6zm11.6.3v13.6L8.4 12z"/></svg></button>
+      <button type="button" class="icon-btn sm" id="mini-play" title="Play/Pause"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg></button>
       <button type="button" class="icon-btn sm" id="mini-skip" title="Skip">⏭</button>
+      <label class="mini-volume"><input class="slider" id="mini-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Громкость"></label>
     </footer>
   </div>
 
+  <div id="pl-picker" class="pl-picker" hidden>
+    <div class="pl-picker-card" role="dialog" aria-labelledby="pl-picker-title">
+      <strong id="pl-picker-title">Куда добавить?</strong>
+      <p class="sub" id="pl-picker-sub">Выбери плейлист</p>
+      <div id="pl-picker-list" class="pl-picker-list"></div>
+      <button type="button" class="btn" id="btn-pl-picker-new">Новый плейлист</button>
+      <button type="button" class="btn quiet" id="btn-pl-picker-cancel">Отмена</button>
+    </div>
+  </div>
   <div id="toast" class="toast" hidden></div>
   <script src="/app.js"></script>
 </body>

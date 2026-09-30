@@ -33,6 +33,13 @@
       pointer-events:none;
     }
     .deck { position:relative; width:100%; height:100%; }
+    .baseline-note {
+      position:fixed; z-index:100; top:16px; left:18px; padding:8px 12px;
+      border:1px solid rgba(255,180,95,.45); border-radius:999px;
+      background:rgba(8,11,18,.9); color:var(--orange);
+      font:600 11px/1 "IBM Plex Mono",monospace; letter-spacing:.08em;
+      text-decoration:none;
+    }
     .slide {
       position:absolute;
       inset:0;
@@ -928,6 +935,7 @@
   </style>
 </head>
 <body>
+  <a class="baseline-note" href="../ROADMAP.md">CURRENT BASELINE · TARGET → ROADMAP</a>
   <main class="deck" id="deck">
     <section class="slide active" data-title="Векторы в памяти">
       <div class="eyebrow">01 · запуск</div>

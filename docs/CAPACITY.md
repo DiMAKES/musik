@@ -20,7 +20,8 @@
 
 - **4 vCPU**, **8 GB RAM**, **100+ GB SSD** (музыка + cache)
 - Первый `embed` на CPU — долго; дальше cache на диске
-- Candidate pool уже при N≥8000 (`MUSIK_CANDIDATE_POOL_AT`)
+- Exact fused scan измеряется через `make bench`; shortlist больше нет,
+  очередь всегда идёт через `BuildCore`
 
 ### Комфортно под 50k (рекомендуется)
 
@@ -38,12 +39,26 @@
 
 ```bash
 MUSIK_WORKERS=6              # scan parallelism
-MUSIK_CANDIDATE_POOL_AT=8000 # shortlist в Go queue (уже default)
-# тест shortlist на малой библиотеке:
-# MUSIK_CANDIDATE_POOL_AT=50
+MUSIK_QUEUE_SIZE=6
 ```
 
-SimsTo в Go параллелится по `GOMAXPROCS` при N≥1500.
+Для нескольких similarity-сигналов Go использует один fused exact pass по
+матрице. Старый одиночный `SimsTo` остаётся для отдельных запросов и
+параллелится по `GOMAXPROCS` при N≥1500.
+
+## Измеренный exact baseline
+
+`make bench` создаёт синтетические матрицы 2k/50k×512 и отдельно измеряет fused
+scan и полную сборку очереди. На тестовой машине (Intel i7-13700F):
+
+| Benchmark | 2k | 50k |
+|-----------|----|-----|
+| Fused exact scan | ~2,2 ms | ~56,5 ms |
+| Exact queue build | ~2,1 ms | ~58,7 ms |
+
+Это baseline конкретной машины, а не универсальный SLA. На целевом сервере
+стоит повторить `make bench` и смотреть p95 `queue_build` в
+`GET /api/metrics/recommendations`.
 
 ## Прогресс pipeline
 
@@ -96,6 +111,8 @@ export MUSIK_PASSWORD=… MUSIK_API_TOKEN=…
 
 ## Чего ждать по UX на 50k
 
-- Radio/skip: с candidate pool — миллисекунды–десятки ms на очередь
+- Radio/skip: exact queue build на 50k — около 59 ms на тестовой desktop-машине;
+  живой p95 смотри в профиле или `GET /api/metrics/recommendations`
 - Первый cold start UI `/api/library` — тяжёлый JSON; лучше полки artists/albums
-- ANN (HNSW) — следующий шаг, если pool всё ещё маловат; сейчас не обязателен при 50k + pool
+- ANN/HNSW не вводится заранее: решение принимается только если exact scan не
+  проходит утверждённый бюджет на целевой машине

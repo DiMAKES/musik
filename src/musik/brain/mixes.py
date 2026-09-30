@@ -10,13 +10,12 @@ import numpy as np
 from musik.brain.generators import (
     PlaylistBuild,
     _forbidden_rows,
-    _interleave,
-    _mmr_select,
-    _pick_far,
+    _noisy_query,
     _taste_vector,
     generate_daily,
     generate_weekly,
 )
+from musik.brain.ranker import rank_index
 from musik.brain.store import latest_playlist
 from musik.config import get_settings
 from musik.db.schema import connect, utcnow
@@ -118,49 +117,41 @@ def generate_for_you(
         seed = int(date.today().strftime("%Y%m%d"))
     rng = np.random.default_rng(seed)
     center, center_src = _taste_vector(index)
-    noise = rng.normal(0, 0.02, size=center.shape).astype(np.float32)
-    query = center + noise
-    query = query / (np.linalg.norm(query) + 1e-12)
-    sims = index.sims_to_vector(query)
-
+    query = _noisy_query(center, rng, 0.02)
     pack_forbidden = _forbidden_rows(index, forbidden_track_ids)
     soft_forbidden = (
         _for_you_forbidden_rows(index, recent_days=recent_days) | pack_forbidden
     )
     preferred_size = min(size, max(0, index.size - len(soft_forbidden)))
-    n_far = max(0, int(round(preferred_size * explore_ratio)))
-    n_far = min(n_far, preferred_size // 2)
-    n_near = preferred_size - n_far
-    near = _mmr_select(
+    ranked = rank_index(
         index,
-        sims,
-        size=n_near,
-        lambda_=0.76,
+        taste=query,
         forbidden=soft_forbidden,
+        size=preferred_size,
+        explore_ratio=explore_ratio,
     )
-    far_forbidden = soft_forbidden | set(near)
-    far = _pick_far(index, sims, k=n_far, forbidden=far_forbidden) if n_far else []
-    # Small libraries may not have enough unseen tracks. Fill without the soft
-    # history exclusion instead of returning a short playlist.
-    if len(near) + len(far) < min(size, index.size):
-        selected = set(near) | set(far)
-        near.extend(
-            _mmr_select(
+    if len(ranked) < min(size, index.size):
+        used = {int(item["row"]) for item in ranked}
+        ranked.extend(
+            rank_index(
                 index,
-                sims,
-                size=min(size, index.size) - len(selected),
-                lambda_=0.72,
-                forbidden=selected,
+                taste=query,
+                forbidden=used,
+                size=min(size, index.size) - len(ranked),
+                explore_ratio=explore_ratio,
             )
         )
-    ordered = _interleave(near, far)
     entries = [
         {
-            "track_id": int(index.meta[r]["id"]),
-            "explanation": f"для вас · cosine {float(sims[r]):.3f}"
-            + (" · explore" if is_ex else ""),
+            "track_id": int(item["track_id"]),
+            "explanation": f"для вас · cosine {float(item['sim_taste']):.3f}"
+            + (
+                " · explore"
+                if item["source"] in {"explore_adjacent", "wildcard", "resurface", "new_in_library"}
+                else ""
+            ),
         }
-        for r, is_ex in ordered[:size]
+        for item in ranked[:size]
     ]
     return PlaylistBuild(
         kind="for_you",
@@ -174,7 +165,7 @@ def generate_for_you(
             "excluded": len(soft_forbidden),
             "pack_excluded": len(pack_forbidden),
             "explore_ratio": explore_ratio,
-            "method": "taste+daily-noise+MMR+recent-exclusion",
+            "method": "ranker+quotas+recent-exclusion",
         },
     )
 
@@ -203,45 +194,38 @@ def generate_weekday(
     # seeded perturbation prevents those fallback shelves from collapsing into
     # the same ranking while remaining deterministic for the current night.
     noise_scale = 0.035 if signal_count == 0 else 0.015
-    noise = rng.normal(0, noise_scale, size=center.shape).astype(np.float32)
-    q = center + noise
-    q = q / (np.linalg.norm(q) + 1e-12)
-    sims = index.sims_to_vector(q)
+    q = _noisy_query(center, rng, noise_scale)
     forbidden = _forbidden_rows(index, forbidden_track_ids)
     target_size = min(size, max(0, index.size - len(forbidden)))
-    n_far = (
-        max(1, int(round(target_size * explore_ratio)))
-        if explore_ratio > 0 and target_size > 0
-        else 0
-    )
-    n_far = min(n_far, target_size // 2)
-    n_near = target_size - n_far
-    near = _mmr_select(
+    ranked = rank_index(
         index,
-        sims,
-        size=n_near,
-        lambda_=0.7,
+        taste=q,
         forbidden=forbidden,
+        size=target_size,
+        explore_ratio=explore_ratio,
     )
-    far = _pick_far(index, sims, k=n_far, forbidden=forbidden | set(near))
-    if len(near) + len(far) < min(size, index.size):
-        selected = set(near) | set(far)
-        near.extend(
-            _mmr_select(
+    if len(ranked) < min(size, index.size):
+        used = {int(item["row"]) for item in ranked}
+        ranked.extend(
+            rank_index(
                 index,
-                sims,
-                size=min(size, index.size) - len(selected),
-                forbidden=selected,
+                taste=q,
+                forbidden=used,
+                size=min(size, index.size) - len(ranked),
+                explore_ratio=explore_ratio,
             )
         )
-    ordered = _interleave(near, far)
     entries = [
         {
-            "track_id": int(index.meta[r]["id"]),
-            "explanation": f"{title} · cosine {float(sims[r]):.3f}"
-            + (" · explore" if is_ex else ""),
+            "track_id": int(item["track_id"]),
+            "explanation": f"{title} · cosine {float(item['sim_taste']):.3f}"
+            + (
+                " · explore"
+                if item["source"] in {"explore_adjacent", "wildcard", "resurface", "new_in_library"}
+                else ""
+            ),
         }
-        for r, is_ex in ordered[:size]
+        for item in ranked[:size]
     ]
     return PlaylistBuild(
         kind=key,

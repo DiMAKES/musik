@@ -1,19 +1,26 @@
 package playback
 
 import (
+	"database/sql"
+	"errors"
 	"time"
 
+	"github.com/torwin-job/musik/player/internal/db"
 	"github.com/torwin-job/musik/player/internal/taste"
 )
 
 type Event struct {
-	Type        string   `json:"type"`
-	TrackID     int64    `json:"track_id"`
-	SessionID   string   `json:"session_id"`
-	PositionSec *float64 `json:"position_sec"`
-	DurationSec *float64 `json:"duration_sec"`
-	ListenedSec *float64 `json:"listened_sec"`
-	Reason      string   `json:"reason"`
+	Type         string   `json:"type"`
+	EventID      string   `json:"event_id"`
+	ImpressionID string   `json:"impression_id"`
+	ClientID     string   `json:"client_id"`
+	DeviceID     string   `json:"device_id"`
+	TrackID      int64    `json:"track_id"`
+	SessionID    string   `json:"session_id"`
+	PositionSec  *float64 `json:"position_sec"`
+	DurationSec  *float64 `json:"duration_sec"`
+	ListenedSec  *float64 `json:"listened_sec"`
+	Reason       string   `json:"reason"`
 }
 
 type EventResult struct {
@@ -28,40 +35,89 @@ type EventResult struct {
 	Ended        bool
 	IsEnd        bool
 	IsRate       bool
+	Error        string
+	Conflict     bool
 }
 
 func (e *Engine) ApplyEvent(sess *Session, ev Event) EventResult {
 	ev.SessionID = sess.ID
+	if sess.Mode == "share" {
+		if ev.Type == "track_end" || ev.Type == "skip" {
+			nextID := e.Advance(sess)
+			return EventResult{OK: true, IsEnd: true, NextID: nextID, Ended: nextID == 0}
+		}
+		return EventResult{OK: true, Ignored: true, IgnoreReason: "public_share_not_owner_feedback"}
+	}
+	if ev.EventID == "" {
+		ev.EventID = db.NewID()
+	}
+	ref, err := e.Store.ResolveImpression(ev.ImpressionID, sess.ID, ev.TrackID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, db.ErrAmbiguousImpression) {
+			return EventResult{Error: err.Error(), Conflict: true}
+		}
+		return EventResult{Error: err.Error()}
+	}
+	if err == nil {
+		ev.ImpressionID = ref.ImpressionID
+	}
+	source := "manual"
+	requestID := ""
+	played := false
+	if err == nil {
+		source, requestID = ref.Source, ref.RequestID
+		played = ref.Played
+	}
+	apply := func(outcome string, ratio float64) (db.LifecycleResult, error) {
+		return e.Store.ApplyLifecycleEvent(db.LifecycleEvent{
+			EventID: ev.EventID, Type: ev.Type, TrackID: ev.TrackID,
+			SessionID: sess.ID, ImpressionID: ev.ImpressionID,
+			RequestID: requestID, Source: source, ClientID: ev.ClientID,
+			DeviceID: ev.DeviceID, Reason: ev.Reason,
+			PositionSec: ev.PositionSec, DurationSec: ev.DurationSec,
+			ListenedSec: ev.ListenedSec, ListenedRatio: ratio, Outcome: outcome,
+		})
+	}
 	switch ev.Type {
 	case "track_start":
+		lifecycle, err := apply("", 0)
+		if err != nil {
+			return EventResult{Error: err.Error()}
+		}
+		if !lifecycle.Inserted {
+			return EventResult{OK: true, Ignored: true, IgnoreReason: "duplicate_event"}
+		}
 		if sess.Current != 0 && sess.Current != ev.TrackID {
 			sess.Prev = sess.Current
 		}
 		sess.Current = ev.TrackID
 		e.ExcludeTrack(sess, ev.TrackID)
-		_, _ = e.Store.InsertListen(ev.TrackID, "start", "player", ev.SessionID, "",
-			ev.PositionSec, ev.DurationSec, nil)
+		if lifecycle.LifecycleChanged {
+			e.Idx.BumpShownLocal(ev.TrackID)
+			_ = e.Store.BumpRecStats(ev.TrackID, 1, 0, 0)
+		}
 		if sess.Prev != 0 && sess.Prev != ev.TrackID {
 			_ = e.Store.BumpTransition(sess.Prev, ev.TrackID, 1.0)
 			e.BumpTransitionMem(sess.Prev, ev.TrackID, 1.0)
 		}
 		if len(sess.DailyIDs) == 0 && len(sess.Queue) < e.Cfg.QueueSize/2 {
-			e.RefreshQueue(sess, ev.TrackID, true)
+			e.RefreshQueue(sess, ev.TrackID, "refill")
 		}
 		return EventResult{OK: true}
 
 	case "progress":
 		if sess.LastProgressWrite.IsZero() ||
 			time.Since(sess.LastProgressWrite) >= 45*time.Second {
-			_, _ = e.Store.InsertListen(ev.TrackID, "progress", "player", ev.SessionID, "",
-				ev.PositionSec, ev.DurationSec, ev.ListenedSec)
+			if _, err := apply("", 0); err != nil {
+				return EventResult{Error: err.Error()}
+			}
 			sess.LastProgressWrite = time.Now()
 		}
 		if len(sess.DailyIDs) == 0 &&
 			sess.Current != 0 &&
 			len(sess.Queue) < e.Cfg.QueueSize/2 &&
 			time.Since(sess.LastQueueAt) >= 15*time.Second {
-			e.RefreshQueue(sess, sess.Current, false)
+			e.RefreshQueue(sess, sess.Current, "refill")
 		}
 		return EventResult{OK: true}
 
@@ -82,21 +138,76 @@ func (e *Engine) ApplyEvent(sess *Session, ev Event) EventResult {
 		} else if row, ok := e.Idx.RowOf(ev.TrackID); ok {
 			dur = e.Idx.MetaAt(row).Duration
 		}
-		_, _ = e.Store.InsertListen(ev.TrackID, "track_end", "player", ev.SessionID, reason,
-			ev.PositionSec, ev.DurationSec, &listened)
-		signed, _ := taste.WeightFromListen(listened, dur, reason)
-		if row, ok := e.Idx.RowOf(ev.TrackID); ok && signed != 0 {
-			e.Taste.UpdateEMA(e.Idx.Vector(row), signed, e.Cfg.TasteAlpha)
-			e.PersistTaste(e.Idx.Vector(row), signed, e.Cfg.TasteAlpha)
+		ratio := 0.0
+		if dur > 0 {
+			ratio = listened / dur
 		}
-		if reason == "skipped" && dur > 0 && listened/dur < 0.3 {
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		outcome := "partial"
+		if reason == "completed" || ratio >= 0.8 {
+			outcome = "finished"
+		} else if (ev.Type == "skip" || reason == "skipped") && ratio < 0.3 {
+			outcome = "early_skip"
+		}
+		lifecycle, err := apply(outcome, ratio)
+		if err != nil {
+			return EventResult{Error: err.Error()}
+		}
+		if !lifecycle.Inserted {
+			return EventResult{
+				OK: true, IsEnd: true, Ignored: true, IgnoreReason: "duplicate_or_closed_event",
+				NextID: sess.Current,
+			}
+		}
+		if !lifecycle.LifecycleChanged {
+			nextID := e.Advance(sess)
+			return EventResult{
+				OK: true, IsEnd: true, Ignored: true, IgnoreReason: "already_closed",
+				NextID: nextID, Ended: nextID == 0,
+			}
+		}
+		signed, action := taste.WeightFromListen(listened, dur, reason)
+		if row, ok := e.Idx.RowOf(ev.TrackID); ok {
+			vector := e.Idx.Vector(row)
+			if outcome == "finished" {
+				if signed <= 0 {
+					signed = 1
+				}
+				e.TasteState.UpdatePositive(vector, signed, e.Cfg.TasteAlpha,
+					db.DayPart(time.Now().Hour()), &sess.TasteState)
+				e.PersistTaste(vector, signed, e.Cfg.TasteAlpha)
+			} else if outcome == "early_skip" {
+				e.TasteState.AddEarlySkip(&sess.TasteState, vector, 1-ratio)
+				signed = 0
+			} else {
+				signed = 0
+			}
+			_ = action
+		}
+		if outcome == "early_skip" {
 			_ = e.Store.BumpRecStats(ev.TrackID, 0, 1, 0)
 			e.Idx.BumpSkipEarlyLocal(ev.TrackID)
 		}
-		if reason == "completed" || (dur > 0 && listened/dur >= 0.8) {
+		if outcome == "finished" {
 			_ = e.Store.BumpRecStats(ev.TrackID, 0, 0, 1)
 			e.Idx.BumpCompletedLocal(ev.TrackID)
+			if row, ok := e.Idx.RowOf(ev.TrackID); ok {
+				e.learnActiveContexts(sess, e.Idx.Vector(row), 1)
+			}
 		}
+		if sess.Prev != 0 && sess.Prev != ev.TrackID && sess.Mode != "share" {
+			provenance := "radio"
+			if sess.CurrentItem.Source == "manual" {
+				provenance = "manual"
+			}
+			_ = e.Store.RecordOutcomeTransition(sess.Prev, ev.TrackID, outcome, provenance)
+		}
+		e.ObserveExploreOutcome(source, outcome, true)
 		e.ExcludeTrack(sess, ev.TrackID)
 		nextID := e.Advance(sess)
 		return EventResult{
@@ -115,31 +226,34 @@ func (e *Engine) ApplyEvent(sess *Session, ev Event) EventResult {
 				IgnoreReason: "already_" + ev.Type, Rating: prev,
 			}
 		}
-		wSign := taste.LikeWeight()
-		if ev.Type == "dislike" {
-			wSign = taste.DislikeWeight()
+		lifecycle, err := apply("", 0)
+		if err != nil {
+			return EventResult{Error: err.Error()}
 		}
-		if prev != "" {
-			undo := taste.DislikeWeight()
-			if prev == "dislike" {
-				undo = taste.LikeWeight()
-			}
-			if row, ok := e.Idx.RowOf(ev.TrackID); ok {
-				vec := e.Idx.Vector(row)
-				e.Taste.UpdateEMA(vec, undo, e.Cfg.TasteAlpha)
-				e.PersistTaste(vec, undo, e.Cfg.TasteAlpha)
+		if !lifecycle.Inserted {
+			return EventResult{
+				OK: true, IsRate: true, Ignored: true,
+				IgnoreReason: "duplicate_event", Rating: prev,
 			}
 		}
-		_, _ = e.Store.InsertListen(ev.TrackID, ev.Type, "player", ev.SessionID, "",
-			nil, nil, nil)
 		if row, ok := e.Idx.RowOf(ev.TrackID); ok {
 			vec := e.Idx.Vector(row)
-			e.Taste.UpdateEMA(vec, wSign, e.Cfg.TasteAlpha)
-			e.PersistTaste(vec, wSign, e.Cfg.TasteAlpha)
+			if ev.Type == "like" {
+				e.TasteState.UpdatePositive(vec, taste.LikeWeight(), e.Cfg.TasteAlpha,
+					db.DayPart(time.Now().Hour()), &sess.TasteState)
+				e.PersistTaste(vec, taste.LikeWeight(), e.Cfg.TasteAlpha)
+			} else {
+				e.TasteState.AddDislike(vec, -taste.DislikeWeight())
+				e.persistTasteState(db.DayPart(time.Now().Hour()))
+			}
 		}
 		sess.Rated[ev.TrackID] = ev.Type
+		e.ObserveExploreOutcome(source, ev.Type, played)
 		if len(sess.DailyIDs) == 0 {
-			e.RefreshQueue(sess, sess.Current, true)
+			e.RefreshQueue(sess, sess.Current, ev.Type)
+		} else {
+			sess.UpdatedAt = time.Now()
+			e.persistLocked(sess)
 		}
 		return EventResult{
 			OK: true, IsRate: true, Rating: ev.Type, Flipped: prev != "",

@@ -10,11 +10,22 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/image/draw"
+
 	_ "image/gif"
 	_ "image/png"
 )
 
-// ServeArtwork serves an original artwork file or a cached, width-clamped thumbnail.
+const (
+	artworkJPEGQuality    = 75
+	artworkDefaultWidth   = 640
+	artworkThumbMaxAge    = 2592000
+	artworkOriginalMaxAge = 86400
+)
+
+var artworkThumbWidths = []int{96, 256, 640}
+
+// ServeArtwork serves a cached JPEG thumbnail (96/256/640) or the original for ?full=1.
 func (s *Service) ServeArtwork(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -32,35 +43,29 @@ func (s *Service) ServeArtwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxWidth := 0
+	if r.URL.Query().Get("full") == "1" {
+		w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(artworkOriginalMaxAge))
+		s.serveArtworkFile(w, r, path, imageContentType(path))
+		return
+	}
+
+	maxWidth := artworkDefaultWidth
 	if queryWidth := r.URL.Query().Get("w"); queryWidth != "" {
-		if width, err := strconv.Atoi(queryWidth); err == nil {
-			maxWidth = width
-		}
-	}
-	if maxWidth > 0 {
-		if maxWidth < 48 {
-			maxWidth = 48
-		}
-		if maxWidth > 512 {
-			maxWidth = 512
+		if width, err := strconv.Atoi(queryWidth); err == nil && width > 0 {
+			maxWidth = snapArtworkWidth(width)
 		}
 	}
 
-	w.Header().Set("Cache-Control", "private, max-age=86400")
-	if maxWidth > 0 {
-		if thumb, err := s.ensureArtworkThumbnail(id, path, maxWidth); err == nil && thumb != "" {
-			file, err := os.Open(thumb)
-			if err == nil {
-				defer file.Close()
-				stat, _ := file.Stat()
-				w.Header().Set("Content-Type", "image/jpeg")
-				http.ServeContent(w, r, filepath.Base(thumb), stat.ModTime(), file)
-				return
-			}
-		}
+	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(artworkThumbMaxAge))
+	if thumb, err := s.ensureArtworkThumbnail(id, path, maxWidth); err == nil && thumb != "" {
+		s.serveArtworkFile(w, r, thumb, "image/jpeg")
+		return
 	}
 
+	s.serveArtworkFile(w, r, path, imageContentType(path))
+}
+
+func (s *Service) serveArtworkFile(w http.ResponseWriter, r *http.Request, path, mediaType string) {
 	file, err := os.Open(path)
 	if err != nil {
 		http.Error(w, "file missing", http.StatusNotFound)
@@ -68,7 +73,7 @@ func (s *Service) ServeArtwork(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 	stat, _ := file.Stat()
-	if mediaType := imageContentType(path); mediaType != "" {
+	if mediaType != "" {
 		w.Header().Set("Content-Type", mediaType)
 	}
 	http.ServeContent(w, r, filepath.Base(path), stat.ModTime(), file)
@@ -87,6 +92,25 @@ func imageContentType(path string) string {
 	default:
 		return ""
 	}
+}
+
+func snapArtworkWidth(width int) int {
+	best := artworkThumbWidths[0]
+	bestDist := absInt(width - best)
+	for _, candidate := range artworkThumbWidths[1:] {
+		dist := absInt(width - candidate)
+		if dist < bestDist || (dist == bestDist && candidate > best) {
+			best, bestDist = candidate, dist
+		}
+	}
+	return best
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (s *Service) ensureArtworkThumbnail(id int64, srcPath string, maxWidth int) (string, error) {
@@ -113,7 +137,7 @@ func (s *Service) ensureArtworkThumbnail(id int64, srcPath string, maxWidth int)
 	}
 	out := resizeMax(img, maxWidth)
 	var encoded bytes.Buffer
-	if err := jpeg.Encode(&encoded, out, &jpeg.Options{Quality: 78}); err != nil {
+	if err := jpeg.Encode(&encoded, out, &jpeg.Options{Quality: artworkJPEGQuality}); err != nil {
 		return "", err
 	}
 	tmp := dst + ".tmp"
@@ -149,12 +173,6 @@ func resizeMax(src image.Image, maxWidth int) image.Image {
 		}
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, newWidth, newHeight))
-	for y := 0; y < newHeight; y++ {
-		sourceY := bounds.Min.Y + y*height/newHeight
-		for x := 0; x < newWidth; x++ {
-			sourceX := bounds.Min.X + x*width/newWidth
-			dst.Set(x, y, src.At(sourceX, sourceY))
-		}
-	}
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, bounds, draw.Over, nil)
 	return dst
 }

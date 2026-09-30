@@ -23,7 +23,13 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Ready    bool    `json:"ready"`
 		Status   string  `json:"status,omitempty"`
 	}
-	catalog, err := s.Store.ListCatalogTracks()
+	limit := queryLimit(r, 0, 2000)
+	needAll := artist != "" || album != ""
+	scanLimit := 0
+	if !needAll {
+		scanLimit = limit
+	}
+	catalog, err := s.Store.ListCatalogTracksLimit(scanLimit)
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
 		return
@@ -43,6 +49,9 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 				Duration: m.Duration, Cluster: m.Cluster, Artwork: art,
 				Ready: m.Status == "ready", Status: m.Status,
 			})
+			if needAll && limit > 0 && len(out) >= limit {
+				break
+			}
 		}
 		writeJSON(w, out)
 		return
@@ -58,6 +67,9 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 			art = "/api/artwork/" + strconv.FormatInt(m.ID, 10)
 		}
 		out = append(out, row{m.ID, m.Artist, m.Title, m.Album, m.Duration, m.ClusterID, art, true, "ready"})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	writeJSON(w, out)
 }

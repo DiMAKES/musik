@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from musik.brain.generators import _interleave, _pick_far
+from musik.brain.ranker import label_sources, primary_source, rank_index
 from musik.index.brute import EmbeddingIndex
 
 
-def test_pick_far_and_interleave():
+def test_source_labels_split_near_and_far():
+    assert primary_source(label_sources(sim_taste=0.7)) == "exploit"
+    assert "explore_adjacent" in label_sources(sim_taste=0.3)
+    assert primary_source(label_sources(sim_taste=0.05)) == "wildcard"
+
+
+def test_rank_index_respects_forbidden_and_size():
     rng = np.random.default_rng(0)
     n, d = 40, 16
     mat = rng.normal(size=(n, d)).astype(np.float32)
@@ -21,14 +27,7 @@ def test_pick_far_and_interleave():
         meta=meta,
         md5s=[str(i) for i in range(n)],
     )
-    q = idx.centroid()
-    sims = idx.sims_to_vector(q)
-    near = list(np.argsort(-sims)[:10])
-    far = _pick_far(idx, sims, k=3, forbidden=set(near))
-    assert len(far) == 3
-    assert not set(far) & set(near)
-    # far should be on average less similar than near
-    assert float(sims[far].mean()) < float(sims[near].mean())
-    merged = _interleave(near, far)
-    assert len(merged) == 13
-    assert sum(1 for _, ex in merged if ex) == 3
+    ranked = rank_index(idx, taste=idx.centroid(), forbidden={0, 1}, size=8, explore_ratio=0.25)
+    assert len(ranked) == 8
+    assert {item["track_id"] for item in ranked}.isdisjoint({0, 1})
+    assert all(item["source"] for item in ranked)

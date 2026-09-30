@@ -57,7 +57,7 @@ func (s *Server) handleMixes(w http.ResponseWriter, _ *http.Request) {
 				card["cover_track_id"] = tracks[0].TrackID
 			}
 		} else {
-			id, name, n, err := s.Store.PlaylistMeta(m.Kind)
+			id, name, n, coverID, createdAt, err := s.Store.PlaylistMeta(m.Kind)
 			if err != nil {
 				writeErr(w, 500, "db", err.Error())
 				return
@@ -68,11 +68,12 @@ func (s *Server) handleMixes(w http.ResponseWriter, _ *http.Request) {
 			card["ready"] = id != 0 && n > 0
 			if id != 0 {
 				card["playlist_id"] = id
-				pl, _ := s.Store.LatestPlaylist(m.Kind)
-				if pl != nil && len(pl.Tracks) > 0 {
-					card["cover_track_id"] = pl.Tracks[0].TrackID
-					card["generated_at"] = pl.CreatedAt
-					if generatedAt, err := time.Parse(time.RFC3339Nano, pl.CreatedAt); err == nil {
+				if coverID != 0 {
+					card["cover_track_id"] = coverID
+				}
+				if createdAt != "" {
+					card["generated_at"] = createdAt
+					if generatedAt, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
 						card["age_seconds"] = int64(time.Since(generatedAt).Seconds())
 						card["stale"] = time.Since(generatedAt) > 36*time.Hour
 					}
@@ -108,7 +109,6 @@ func (s *Server) handleMixPlay(w http.ResponseWriter, r *http.Request) {
 	var ids []int64
 	var name string
 	mode := "playlist"
-	generatedMix := false
 
 	if kind == "later" {
 		tracks, err := s.Store.LaterList()
@@ -141,7 +141,6 @@ func (s *Server) handleMixPlay(w http.ResponseWriter, r *http.Request) {
 		name = "Избранное"
 		mode = "favorites"
 	} else {
-		generatedMix = true
 		pl, err := s.Store.LatestPlaylist(kind)
 		if err != nil {
 			writeErr(w, 500, "db", err.Error())
@@ -164,11 +163,5 @@ func (s *Server) handleMixPlay(w http.ResponseWriter, r *http.Request) {
 	sess := s.Play.StartFixed(ids, mode, name, kind, startIdx, req.StartTrackID)
 	sess.Lock()
 	defer sess.Unlock()
-	if generatedMix {
-		for _, id := range ids {
-			_ = s.Store.BumpRecStats(id, 1, 0, 0)
-			s.Idx.BumpShownLocal(id)
-		}
-	}
 	writeJSON(w, s.playResponse(sess))
 }

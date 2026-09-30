@@ -209,8 +209,10 @@ func publicPath(r *http.Request) bool {
 }
 
 func isStaticAsset(p string) bool {
-	return p == "/app.js" || p == "/style.css" || p == "/favicon.ico" ||
+	return p == "/app.js" || p == "/style.css" || p == "/fonts.css" || p == "/favicon.ico" ||
+		strings.HasPrefix(p, "/fonts/") ||
 		strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") ||
+		strings.HasSuffix(p, ".woff2") || strings.HasSuffix(p, ".woff") ||
 		strings.HasSuffix(p, ".webmanifest") || strings.HasSuffix(p, ".map")
 }
 

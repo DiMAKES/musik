@@ -12,6 +12,9 @@ type Config struct {
 	Addr                 string
 	ExploreRatio         float64
 	DiscoverExploreRatio float64
+	ExploreLo            float64
+	ExploreHi            float64
+	RankerPath           string
 	ProfileReadyAt       int
 	ProfileFormingAt     int
 	NewTrackDays         int
@@ -34,8 +37,7 @@ type Config struct {
 	ShareMaxListeners    int
 	MobileBitrate        string // e.g. 160k — Android / LTE stream profile
 	MobileFormat         string // aac | mp3
-	CORSOrigins          []string
-	CandidatePoolAt      int // N at which queue uses shortlist (default 8000)
+	CORSOrigins []string
 }
 
 func Load() Config {
@@ -47,6 +49,9 @@ func Load() Config {
 		Addr:                 env("MUSIK_PLAYER_ADDR", ":8787"),
 		ExploreRatio:         envFloat("MUSIK_EXPLORE_RATIO", 0.15),
 		DiscoverExploreRatio: envFloat("MUSIK_DISCOVER_EXPLORE", 0.35),
+		ExploreLo:            envFloat("MUSIK_EXPLORE_LO", 0.10),
+		ExploreHi:            envFloat("MUSIK_EXPLORE_HI", 0.40),
+		RankerPath:           env("MUSIK_RANKER_PATH", filepath.Join(root, "data", "models", "ranker.json")),
 		ProfileReadyAt:       envInt("MUSIK_PROFILE_READY_AT", 8),
 		ProfileFormingAt:     envInt("MUSIK_PROFILE_FORMING_AT", 3),
 		NewTrackDays:         envInt("MUSIK_NEW_TRACK_DAYS", 14),
@@ -69,8 +74,7 @@ func Load() Config {
 		ShareMaxListeners:    envInt("MUSIK_SHARE_MAX_LISTENERS", 4),
 		MobileBitrate:        env("MUSIK_MOBILE_BITRATE", "160k"),
 		MobileFormat:         stringsToLower(env("MUSIK_MOBILE_FORMAT", "aac")),
-		CORSOrigins:          splitCSV(env("MUSIK_CORS_ORIGINS", "")),
-		CandidatePoolAt:      envInt("MUSIK_CANDIDATE_POOL_AT", 8000),
+		CORSOrigins: splitCSV(env("MUSIK_CORS_ORIGINS", "")),
 	}
 }
 

@@ -16,7 +16,8 @@ services:
       - musik-data:/data
       - ${MUSIK_LIBRARY:-./data/music}:/music
     depends_on:
-      - worker
+      worker:
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -36,6 +37,16 @@ services:
     volumes:
       - musik-data:/data
       - ${MUSIK_LIBRARY:-./data/music}:/music:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=2))['status'] == 'ready'"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     # no ports: — internal only
     restart: unless-stopped
 

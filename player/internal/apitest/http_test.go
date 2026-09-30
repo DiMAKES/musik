@@ -313,8 +313,8 @@ func TestRecommendationMetricsIncludesLatency(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Window != "7d" {
-		t.Fatalf("window=%q, want 7d", body.Window)
+	if body.Window != "90d" {
+		t.Fatalf("window=%q, want 90d", body.Window)
 	}
 	if body.LatencyMS["similar"].Count < 1 {
 		t.Fatalf("expected similar latency samples, got %#v", body.LatencyMS)

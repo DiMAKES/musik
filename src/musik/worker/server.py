@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from musik.config import get_settings
 from musik.db import ensure_db
+from musik.db.migrations import LATEST_SCHEMA_VERSION
 from musik.jobs.queue import enqueue_job, enqueue_job_once, get_job, list_recent
 from musik.jobs.runner import run_pending
 
@@ -99,6 +100,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path == "/health":
+                _json_response(self, 200, {"status": "ready", "schema_version": LATEST_SCHEMA_VERSION})
+                return
             if path == "/jobs":
                 jobs = [_job_public(j) for j in list_recent()]
                 _json_response(self, 200, {"jobs": jobs})
