@@ -58,3 +58,36 @@ def test_unreadable_file_returns_empty_params(tmp_path):
 
 def test_analysis_sr_is_shared():
     assert ANALYSIS_SR == 22_050
+
+
+def test_ffmpeg_fallback_when_libsndfile_cannot_decode(tmp_path, monkeypatch):
+    """libsndfile has no AAC support, so .m4a used to yield no params at all."""
+    import shutil
+
+    import librosa
+    import soundfile
+
+    from musik.scanner import audio_params
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+
+    wav = _write_tone(tmp_path / "tone.wav", seconds=12.0, sr=44100)
+
+    def _no_soundfile(*_args, **_kwargs):
+        raise RuntimeError("Format not recognised.")
+
+    monkeypatch.setattr(soundfile, "info", _no_soundfile)
+    monkeypatch.setattr(librosa, "load", _no_soundfile)
+
+    loaded = audio_params._load_mono(wav, 10.0)
+
+    assert loaded is not None
+    audio, sr = loaded
+    assert sr == 44100
+    assert audio.size == pytest.approx(44100 * 10, rel=0.02)
+
+    params = compute_audio_params(wav, max_seconds=10.0, key_seconds=10.0)
+    assert params.lufs is not None
+    assert params.bpm is not None
+    assert params.key is not None

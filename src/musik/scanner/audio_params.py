@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,8 +56,60 @@ class AudioParams:
     mode: str | None = None
 
 
+def _ffprobe_sample_rate(path: Path) -> int | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        out = subprocess.check_output(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            timeout=30,
+            stderr=subprocess.STDOUT,
+        )
+        return int(out.decode().strip()) or None
+    except Exception:
+        return None
+
+
+def _ffmpeg_load_mono(path: Path, max_seconds: float) -> tuple[np.ndarray, int] | None:
+    """Decode with ffmpeg, keeping the file's own sample rate."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    sample_rate = _ffprobe_sample_rate(path) or 48_000
+    raw = subprocess.check_output(
+        [
+            ffmpeg, "-nostdin", "-v", "error",
+            "-t", f"{max(max_seconds, 0.05):.3f}",
+            "-i", str(path),
+            "-f", "f32le", "-acodec", "pcm_f32le",
+            "-ac", "1", "-ar", str(sample_rate),
+            "pipe:1",
+        ],
+        timeout=300,
+    )
+    audio = np.frombuffer(raw, dtype=np.float32)
+    if audio.size == 0:
+        return None
+    return audio.astype(np.float64), sample_rate
+
+
 def _load_mono(path: Path, max_seconds: float) -> tuple[np.ndarray, int] | None:
-    """Decode up to max_seconds of mono audio at the file's own sample rate."""
+    """
+    Decode up to max_seconds of mono audio at the file's own sample rate.
+
+    soundfile → librosa → ffmpeg. The last step is what the embedding path has
+    had all along (segments._ffmpeg_load_window); without it libsndfile's lack of
+    AAC support silently left every .m4a track with no loudness, tempo or key,
+    so the ranker saw bpm_missing / lufs_missing for a whole format.
+    """
     import librosa
     import soundfile as sf
 
@@ -67,12 +120,19 @@ def _load_mono(path: Path, max_seconds: float) -> tuple[np.ndarray, int] | None:
         audio, _ = sf.read(str(path), frames=frames, dtype="float64", always_2d=True)
         return np.mean(audio, axis=1), sr
     except Exception:
-        try:
-            audio, sr = librosa.load(str(path), sr=None, mono=True, duration=max_seconds)
-            return audio.astype(np.float64), int(sr)
-        except Exception as exc:
-            logger.warning("decode failed for %s: %s", path, exc)
-            return None
+        pass
+
+    try:
+        audio, sr = librosa.load(str(path), sr=None, mono=True, duration=max_seconds)
+        return audio.astype(np.float64), int(sr)
+    except Exception:
+        logger.info("soundfile/librosa cannot decode %s — trying ffmpeg", path)
+
+    try:
+        return _ffmpeg_load_mono(path, max_seconds)
+    except Exception as exc:
+        logger.warning("decode failed for %s: %s", path, exc)
+        return None
 
 
 def _lufs_from(audio: np.ndarray, sr: int) -> float | None:
