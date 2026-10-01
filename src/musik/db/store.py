@@ -133,8 +133,11 @@ def update_audio_scalars(
             )
 
 
+DUPLICATE_DURATION_TOLERANCE_SEC = 3.0
+
+
 def mark_duplicates() -> int:
-    """Mark duplicates: same MD5, then fingerprint, then artist+title.
+    """Mark duplicates: same MD5, then fingerprint, then artist+title+duration.
 
     Keeps the highest-bitrate (then largest) copy; others get is_duplicate_of.
     """
@@ -194,22 +197,40 @@ def mark_duplicates() -> int:
             ORDER BY fingerprint, bitrate DESC, file_size DESC, id ASC
             """
         )
-        # 3) same song metadata (different encodes / renames)
-        marked += _mark_groups(
+        # 3) same song metadata (different encodes / renames). A title match alone
+        # is not enough: live and studio takes share titles, so the durations must
+        # agree too. Each kept copy only absorbs copies within the tolerance.
+        rows = conn.execute(
             """
             SELECT id,
                    lower(trim(artist)) || '|' || lower(trim(title)) AS grp,
-                   COALESCE(bitrate, 0) AS bitrate,
-                   COALESCE(file_size, 0) AS file_size
+                   duration
             FROM tracks
             WHERE is_active = 1
               AND is_duplicate_of IS NULL
               AND trim(COALESCE(artist, '')) != ''
               AND trim(COALESCE(title, '')) != ''
+              AND duration IS NOT NULL AND duration > 0
             ORDER BY lower(trim(artist)), lower(trim(title)),
-                     bitrate DESC, file_size DESC, id ASC
+                     COALESCE(bitrate, 0) DESC, COALESCE(file_size, 0) DESC, id ASC
             """
-        )
+        ).fetchall()
+        kept: dict[str, list[tuple[int, float]]] = {}
+        for row in rows:
+            copies = kept.setdefault(row["grp"], [])
+            best = next(
+                (tid for tid, dur in copies
+                 if abs(dur - row["duration"]) <= DUPLICATE_DURATION_TOLERANCE_SEC),
+                None,
+            )
+            if best is None:
+                copies.append((row["id"], row["duration"]))
+            else:
+                conn.execute(
+                    "UPDATE tracks SET is_duplicate_of = ?, updated_at = ? WHERE id = ?",
+                    (best, utcnow(), row["id"]),
+                )
+                marked += 1
         return marked
 
 
