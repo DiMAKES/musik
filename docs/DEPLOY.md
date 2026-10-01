@@ -41,6 +41,24 @@ Volumes: `musik-data` → SQLite + кэши; библиотека RO из `MUSIK
 
 Go player никогда не создаёт и не изменяет таблицы.
 
+### Готовые образы (без сборки)
+
+GitHub Actions (`.github/workflows/images.yml`) собирает образы при каждом push в
+`main`, на теги `v*` и по кнопке: `ghcr.io/<owner>/musik-player` и
+`ghcr.io/<owner>/musik-worker` с тегами `latest`, `sha-<коммит>` и версией тега.
+Запуск из них — тот же стек, но без Go/torch на сервере:
+
+```bash
+cp .env.example .env
+# обязательно: MUSIK_PASSWORD, MUSIK_API_TOKEN, MUSIK_SESSION_SECRET, MUSIK_LIBRARY
+docker compose -f docker-compose.images.yml pull
+docker compose -f docker-compose.images.yml up -d
+```
+
+`MUSIK_IMAGE_TAG` закрепляет конкретную сборку, `MUSIK_IMAGE_OWNER` — чьи образы
+брать (форк публикует свои). Новые пакеты GHCR создаются приватными: владельцу
+репозитория нужно один раз включить Public в настройках пакета.
+
 ### Публичный VPS (белый IP)
 
 1. Задай сильные секреты в `.env` (не `AUTH_DISABLED`).
