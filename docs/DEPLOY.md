@@ -90,6 +90,25 @@ MUSIK_PUBLIC_BASE_URL=https://music.example.com
 
 UI **Поделиться** → `…/listen/<token>.mp3`. Отозвать в Профиле. Слушатели не меняют вкус.
 
+## Темы
+
+Плеер читает папку тем с диска при каждом запросе. Новая тема не требует пересборки и перезапуска: положи каталог и обнови страницу.
+
+По умолчанию это `data/themes` рядом с базой (`MUSIK_THEMES`). В Docker каталог — `/data/themes` на томе `musik-data`, не папка проекта:
+
+```bash
+docker compose cp themes/ink player:/data/themes/ink
+```
+
+```text
+data/themes/ink/
+  theme.json
+  theme.css
+  fonts/          # необязательно, только .woff2 / .woff
+```
+
+`theme.json` задаёт `id` (он же имя папки), `name`, `blurb`, `swatch` и `color`. `theme.css` стилизует `html[data-theme="<id>"]`. Готовый пример: `cp -a themes/ink data/themes/`. Папка с тем же `id`, что у встроенной темы, заменяет её файлы. Своя палитра из профиля по-прежнему живёт только в браузере.
+
 ## Makefile
 
 | Target | Действие |

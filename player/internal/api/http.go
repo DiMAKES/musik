@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/torwin-job/musik/player/internal/themes"
 )
 
 func withCORS(next http.Handler, allowed []string) http.Handler {
@@ -73,11 +75,18 @@ func playHTTPStatus(err error) int {
 }
 
 func (s *Server) staticHandler() http.Handler {
-	if s.Static == nil {
-		return http.NotFoundHandler()
+	var fileServer http.Handler
+	if s.Static != nil {
+		fileServer = http.FileServer(s.Static)
 	}
-	fileServer := http.FileServer(s.Static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.serveThemeAsset(w, r) {
+			return
+		}
+		if fileServer == nil {
+			http.NotFound(w, r)
+			return
+		}
 		setStaticCacheControl(w, r.URL.Path)
 		if r.URL.Path == "/" || r.URL.Path == "" {
 			f, err := s.Static.Open("index.html")
@@ -121,10 +130,62 @@ func staticCacheControl(path string) string {
 		// index.html (and the app.js it pairs with) for up to an hour after a deploy.
 		return "no-cache"
 	case "/app.js", "/style.css", "/fonts.css":
-		return "public, max-age=3600"
+		// Revalidate with the page. max-age kept a stale UI for an hour after a refresh.
+		return "no-cache"
 	default:
+		if strings.HasPrefix(path, "/themes/") && strings.HasSuffix(path, ".css") {
+			return "no-cache"
+		}
 		return ""
 	}
+}
+
+func (s *Server) handleThemes(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"themes": themes.List(s.Cfg.ThemesDir)})
+}
+
+func (s *Server) serveThemeAsset(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	path := r.URL.Path
+	if !strings.HasPrefix(path, "/themes/") || strings.Contains(path, "..") {
+		return false
+	}
+	rest := strings.TrimPrefix(path, "/themes/")
+	if strings.HasSuffix(rest, ".css") && !strings.Contains(rest, "/") {
+		id := strings.TrimSuffix(rest, ".css")
+		if id == "base" {
+			return false
+		}
+		body, fromDisk, ok := themes.Stylesheet(s.Cfg.ThemesDir, id)
+		if !ok {
+			return false
+		}
+		if fromDisk {
+			w.Header().Set("Cache-Control", "no-cache")
+		} else if cc := staticCacheControl(path); cc != "" {
+			w.Header().Set("Cache-Control", cc)
+		}
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(body)
+		}
+		return true
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) == 3 && parts[1] == "fonts" {
+		font, ok := themes.FontPath(s.Cfg.ThemesDir, parts[0], parts[2])
+		if !ok {
+			http.NotFound(w, r)
+			return true
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, font)
+		return true
+	}
+	return false
 }
 
 func modTime(info fs.FileInfo) time.Time {
