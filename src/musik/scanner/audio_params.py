@@ -71,9 +71,11 @@ def _ffprobe_sample_rate(path: Path) -> int | None:
                 str(path),
             ],
             timeout=30,
-            stderr=subprocess.STDOUT,
+            # see _ffprobe_duration: a warning on stderr must not reach the value
+            stderr=subprocess.DEVNULL,
         )
-        return int(out.decode().strip()) or None
+        lines = [line.strip() for line in out.decode(errors="replace").splitlines()]
+        return next((int(line) for line in reversed(lines) if line), None)
     except Exception:
         return None
 

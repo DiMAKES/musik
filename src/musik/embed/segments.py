@@ -114,9 +114,21 @@ def _ffprobe_duration(path: Path) -> float:
             str(path),
         ],
         timeout=30,
-        stderr=subprocess.STDOUT,
+        # NOT merged into stdout: a damaged file makes the decoder print e.g.
+        # "[mp3float @ 0x...] Header missing" while still reporting a correct
+        # duration, and that line would end up in the value being parsed.
+        stderr=subprocess.DEVNULL,
     )
-    return float(out.decode().strip())
+    return _parse_ffprobe_number(out)
+
+
+def _parse_ffprobe_number(raw: bytes) -> float:
+    """Last non-empty line of ffprobe output as a float."""
+    lines = [line.strip() for line in raw.decode(errors="replace").splitlines()]
+    for line in reversed(lines):
+        if line:
+            return float(line)
+    raise ValueError("ffprobe returned no value")
 
 
 def audio_duration(path: Path) -> float:
