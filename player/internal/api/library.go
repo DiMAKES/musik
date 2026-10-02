@@ -25,6 +25,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := queryLimit(r, 0, 2000)
 	needAll := artist != "" || album != ""
+	known := s.Idx.KnownArtists()
 	scanLimit := 0
 	if !needAll {
 		scanLimit = limit
@@ -37,7 +38,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 	out := make([]row, 0, len(catalog))
 	if len(catalog) > 0 {
 		for _, m := range catalog {
-			if !library.MatchArtistAlbum(m.Artist, m.Album, artist, album) {
+			if !library.MatchArtistAlbum(m.Artist, m.Album, artist, album, known) {
 				continue
 			}
 			art := ""
@@ -59,7 +60,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 	n := s.Idx.Size()
 	for i := 0; i < n; i++ {
 		m := s.Idx.MetaAt(i)
-		if !library.MatchArtistAlbum(m.Artist, m.Album, artist, album) {
+		if !library.MatchArtistAlbum(m.Artist, m.Album, artist, album, known) {
 			continue
 		}
 		art := ""

@@ -17,7 +17,8 @@ CREATE TABLE tracks (
  id INTEGER PRIMARY KEY, path TEXT NOT NULL DEFAULT '', file_md5 TEXT, title TEXT,
  artist TEXT, album TEXT, year INTEGER, duration REAL, lufs REAL,
  is_active INTEGER NOT NULL DEFAULT 1,
- is_duplicate_of INTEGER, artwork_path TEXT, created_at TEXT
+ is_duplicate_of INTEGER, artwork_path TEXT, created_at TEXT,
+ is_remaster INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE features (
  track_id INTEGER PRIMARY KEY, status TEXT, cluster_id INTEGER, embedding BLOB,
@@ -201,7 +202,7 @@ CREATE TABLE radio_prefs (
  explore_lo REAL NOT NULL DEFAULT 0.10, explore_hi REAL NOT NULL DEFAULT 0.40,
  updated_at TEXT NOT NULL
 );
-PRAGMA user_version = 5;
+ PRAGMA user_version = 6;
 `
 
 func Create(path string) error {

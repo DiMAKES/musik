@@ -575,12 +575,20 @@ def _ranker_and_explore(conn: sqlite3.Connection) -> None:
     )
 
 
+def _remaster_marker(conn: sqlite3.Connection) -> None:
+    # The scanner strips "… (2001 Remastered)" markers from album tags so an
+    # original and its remaster share one album, and remembers that the marker
+    # was there. Dedup rules use the flag (plus year) to keep both copies.
+    _add_column(conn, "tracks", "is_remaster INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS = (
     Migration(1, "baseline", _baseline),
     Migration(2, "future_data_foundation", _future_data_foundation),
     Migration(3, "recommendation_lifecycle_and_taste", _recommendation_lifecycle_and_taste),
     Migration(4, "playlists_contexts_queue", _playlists_contexts_queue),
     Migration(5, "ranker_and_explore", _ranker_and_explore),
+    Migration(6, "remaster_marker", _remaster_marker),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

@@ -14,6 +14,7 @@ def ensure_db() -> None:
 def upsert_track(data: dict[str, Any]) -> int:
     """Insert or update track by path. Returns track id."""
     now = utcnow()
+    data = {**data, "is_remaster": 1 if data.get("is_remaster") else 0}
     with connect() as conn:
         existing = conn.execute(
             "SELECT id FROM tracks WHERE path = ?", (data["path"],)
@@ -25,6 +26,7 @@ def upsert_track(data: dict[str, Any]) -> int:
                 UPDATE tracks SET
                     file_md5=:file_md5, file_mtime=:file_mtime, file_size=:file_size,
                     title=:title, artist=:artist, album=:album, year=:year,
+                    is_remaster=:is_remaster,
                     track_number=:track_number, duration=:duration, bitrate=:bitrate,
                     sample_rate=:sample_rate, channels=:channels,
                     fingerprint=:fingerprint, lufs=:lufs,
@@ -38,10 +40,12 @@ def upsert_track(data: dict[str, Any]) -> int:
                 """
                 INSERT INTO tracks (
                     path, file_md5, file_mtime, file_size, title, artist, album, year,
+                    is_remaster,
                     track_number, duration, bitrate, sample_rate, channels,
                     fingerprint, lufs, artwork_path, is_active, created_at, updated_at
                 ) VALUES (
                     :path, :file_md5, :file_mtime, :file_size, :title, :artist, :album, :year,
+                    :is_remaster,
                     :track_number, :duration, :bitrate, :sample_rate, :channels,
                     :fingerprint, :lufs, :artwork_path, 1, :created_at, :updated_at
                 )
@@ -133,11 +137,33 @@ def update_audio_scalars(
             )
 
 
-def mark_duplicates() -> int:
-    """Mark duplicates: same MD5, then fingerprint, then artist+title.
+# First tie-breaker inside a duplicate group: container/format rank, lower wins.
+# FLAC beats WAV/AIFF beats Opus/OGG beats M4A/AAC beats MP3 beats anything else.
+FORMAT_RANK_SQL = """
+    CASE
+        WHEN lower(path) LIKE '%.flac' THEN 0
+        WHEN lower(path) LIKE '%.wav'
+          OR lower(path) LIKE '%.aiff'
+          OR lower(path) LIKE '%.aif' THEN 1
+        WHEN lower(path) LIKE '%.opus'
+          OR lower(path) LIKE '%.ogg' THEN 2
+        WHEN lower(path) LIKE '%.m4a'
+          OR lower(path) LIKE '%.aac' THEN 3
+        WHEN lower(path) LIKE '%.mp3' THEN 4
+        ELSE 5
+    END
+"""
 
-    Keeps the highest-bitrate (then largest) copy; others get is_duplicate_of.
+
+def mark_duplicates() -> int:
+    """Mark duplicates: same MD5, then fingerprint, then artist+title+album.
+
+    The winner of a group is the finest copy: format rank first (FLAC >
+    WAV/AIFF > Opus/OGG > M4A/AAC > MP3 > other), then highest bitrate,
+    then largest file (stable: lowest id). Everyone else gets is_duplicate_of
+    and disappears from the catalog until cleanup removes the file.
     """
+    rank = FORMAT_RANK_SQL
     with connect() as conn:
         # Clear previous duplicate flags among active tracks so re-runs are idempotent.
         conn.execute(
@@ -168,7 +194,7 @@ def mark_duplicates() -> int:
 
         # 1) identical files
         marked += _mark_groups(
-            """
+            f"""
             SELECT id,
                    file_md5 AS grp,
                    COALESCE(bitrate, 0) AS bitrate,
@@ -177,28 +203,41 @@ def mark_duplicates() -> int:
             WHERE is_active = 1
               AND is_duplicate_of IS NULL
               AND file_md5 IS NOT NULL AND file_md5 != ''
-            ORDER BY file_md5, bitrate DESC, file_size DESC, id ASC
+            ORDER BY file_md5, {rank},
+                     bitrate DESC, file_size DESC, id ASC
             """
         )
-        # 2) chromaprint (when present)
+        # 2) chromaprint (when present). Year and the remaster flag keep an
+        # original and its remaster in different groups even when the
+        # fingerprint survives mastering (Chromaprint is volume-robust).
         marked += _mark_groups(
-            """
+            f"""
             SELECT id,
-                   fingerprint AS grp,
+                   fingerprint || '|' || COALESCE(CAST(year AS TEXT), '')
+                       || '|' || COALESCE(CAST(is_remaster AS TEXT), '0') AS grp,
                    COALESCE(bitrate, 0) AS bitrate,
                    COALESCE(file_size, 0) AS file_size
             FROM tracks
             WHERE is_active = 1
               AND is_duplicate_of IS NULL
               AND fingerprint IS NOT NULL AND fingerprint != ''
-            ORDER BY fingerprint, bitrate DESC, file_size DESC, id ASC
+            ORDER BY fingerprint, COALESCE(CAST(year AS TEXT), ''),
+                     COALESCE(CAST(is_remaster AS TEXT), '0'), {rank},
+                     bitrate DESC, file_size DESC, id ASC
             """
         )
-        # 3) same song metadata (different encodes / renames)
+        # 3) same song metadata (different encodes / renames / editions).
+        # Album is part of the group key so remasters and other editions of the
+        # same song are never collapsed into one entry; year + is_remaster are
+        # the discriminators for pairs whose tags would otherwise match after
+        # album normalization (e.g. Scorpions 1979 original vs 2001 remaster).
         marked += _mark_groups(
-            """
+            f"""
             SELECT id,
-                   lower(trim(artist)) || '|' || lower(trim(title)) AS grp,
+                   lower(trim(artist)) || '|' || lower(trim(title))
+                       || '|' || lower(trim(COALESCE(album, '')))
+                       || '|' || COALESCE(CAST(year AS TEXT), '')
+                       || '|' || COALESCE(CAST(is_remaster AS TEXT), '0') AS grp,
                    COALESCE(bitrate, 0) AS bitrate,
                    COALESCE(file_size, 0) AS file_size
             FROM tracks
@@ -207,6 +246,9 @@ def mark_duplicates() -> int:
               AND trim(COALESCE(artist, '')) != ''
               AND trim(COALESCE(title, '')) != ''
             ORDER BY lower(trim(artist)), lower(trim(title)),
+                     lower(trim(COALESCE(album, ''))),
+                     COALESCE(CAST(year AS TEXT), ''),
+                     COALESCE(CAST(is_remaster AS TEXT), '0'), {rank},
                      bitrate DESC, file_size DESC, id ASC
             """
         )
@@ -338,3 +380,36 @@ def get_embedding(track_id: int) -> np.ndarray | None:
         if dim and arr.size != dim:
             return arr.astype(np.float32)
         return np.asarray(arr, dtype=np.float32)
+
+
+def list_tracks_needing_artwork(
+    *, limit: int | None = None, force: bool = False
+) -> list[dict[str, Any]]:
+    """Active non-duplicate tracks whose cover file is absent (or all if force).
+
+    The artwork file itself is checked by the caller: artwork_path may point
+    into a container path that does not exist on this host.
+    """
+    sql = """
+        SELECT t.id, t.file_md5, t.artist, t.album, t.artwork_path
+        FROM tracks t
+        WHERE t.is_active = 1 AND COALESCE(t.is_duplicate_of, 0) = 0
+          AND trim(COALESCE(t.artist, '')) != ''
+          AND trim(COALESCE(t.album, '')) != ''
+          AND t.file_md5 IS NOT NULL AND t.file_md5 != ''
+    """
+    if not force:
+        sql += " AND (t.artwork_path IS NULL OR t.artwork_path = '')"
+    sql += " ORDER BY t.artist, t.album, t.track_number"
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(sql).fetchall()]
+
+
+def save_artwork_path(track_id: int, path: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE tracks SET artwork_path = ?, updated_at = ? WHERE id = ?",
+            (path, utcnow(), track_id),
+        )

@@ -22,9 +22,23 @@ type AlbumGroup struct {
 	HasArtwork   bool
 }
 
-func MatchArtistAlbum(gotArtist, gotAlbum, wantArtist, wantAlbum string) bool {
-	if wantArtist != "" && !strings.EqualFold(strings.TrimSpace(gotArtist), strings.TrimSpace(wantArtist)) {
-		return false
+func MatchArtistAlbum(gotArtist, gotAlbum, wantArtist, wantAlbum string, known map[string]struct{}) bool {
+	if wantArtist != "" {
+		want := strings.TrimSpace(wantArtist)
+		// The raw label matches first so queries that carry a full
+		// collaboration string keep working, then each collaborator segment.
+		matched := strings.EqualFold(strings.TrimSpace(gotArtist), want)
+		if !matched {
+			for _, segment := range index.SplitArtists(gotArtist, known) {
+				if strings.EqualFold(strings.TrimSpace(segment), want) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if wantAlbum != "" && !strings.EqualFold(strings.TrimSpace(gotAlbum), strings.TrimSpace(wantAlbum)) {
 		return false
@@ -36,21 +50,19 @@ func GroupArtists(idx *index.Index) []ArtistGroup {
 	if idx == nil {
 		return nil
 	}
+	known := idx.KnownArtists()
 	by := map[string]*ArtistGroup{}
 	n := idx.Size()
 	for i := 0; i < n; i++ {
 		m := idx.MetaAt(i)
 		name := strings.TrimSpace(m.Artist)
 		if name == "" {
-			name = "Unknown"
+			addArtistGroup(by, "Unknown", m)
+			continue
 		}
-		key := strings.ToLower(name)
-		g := by[key]
-		if g == nil {
-			g = &ArtistGroup{Artist: name, CoverTrackID: m.ID, HasArtwork: m.ArtworkPath != ""}
-			by[key] = g
+		for _, segment := range index.SplitArtists(name, known) {
+			addArtistGroup(by, segment, m)
 		}
-		g.Tracks++
 	}
 	out := make([]ArtistGroup, 0, len(by))
 	for _, g := range by {
@@ -65,10 +77,21 @@ func GroupArtists(idx *index.Index) []ArtistGroup {
 	return out
 }
 
+func addArtistGroup(by map[string]*ArtistGroup, name string, m index.Meta) {
+	key := strings.ToLower(name)
+	g := by[key]
+	if g == nil {
+		g = &ArtistGroup{Artist: name, CoverTrackID: m.ID, HasArtwork: m.ArtworkPath != ""}
+		by[key] = g
+	}
+	g.Tracks++
+}
+
 func GroupAlbums(idx *index.Index) []AlbumGroup {
 	if idx == nil {
 		return nil
 	}
+	known := idx.KnownArtists()
 	by := map[string]*AlbumGroup{}
 	n := idx.Size()
 	for i := 0; i < n; i++ {
@@ -77,7 +100,9 @@ func GroupAlbums(idx *index.Index) []AlbumGroup {
 		if album == "" {
 			continue
 		}
-		artist := strings.TrimSpace(m.Artist)
+		// Group by the canonical collaborator segment so a record credited to
+		// several artists stays a single album entry instead of one per artist.
+		artist := index.CanonicalArtist(m.Artist, known)
 		key := strings.ToLower(artist) + "\x00" + strings.ToLower(album)
 		g := by[key]
 		if g == nil {
