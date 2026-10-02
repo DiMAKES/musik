@@ -10,10 +10,32 @@ const WEEKDAY_RU = {
   weekday_sun: "вс",
 };
 
+function randomId() {
+  // crypto.randomUUID() exists only in a secure context: over http on a LAN
+  // address — the setup docs/DEPLOY.md recommends for phones — it is undefined,
+  // and every event threw a TypeError. getRandomValues works there, so the
+  // fallback keeps the randomness and only formats the UUID by hand.
+  if (globalThis.crypto?.randomUUID) {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+}
+
 function clientId() {
   let id = localStorage.getItem("musik_client_id");
   if (!id) {
-    id = crypto.randomUUID();
+    id = randomId();
     localStorage.setItem("musik_client_id", id);
   }
   return id;
@@ -787,7 +809,7 @@ async function postEvent(type, extra = {}) {
   const audio = $("audio");
   const body = {
     type,
-    event_id: extra.event_id || crypto.randomUUID(),
+    event_id: extra.event_id || randomId(),
     track_id: current?.id,
     session_id: sessionId,
     impression_id: extra.impression_id || current?.impression_id,
