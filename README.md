@@ -109,6 +109,7 @@ musik/
 │
 ├── docs/                     ← документация
 ├── scripts/                  ← утилиты
+├── tools/                    ← разовые инструменты библиотеки (CUE, дубли, артисты)
 ├── src/musik/                ← Python: scan / embed / jobs / worker
 ├── player/                   ← Go: API + UI
 ├── mobile/README.md          ← контракт отдельного Flutter-клиента
@@ -148,7 +149,7 @@ musik/
 
 | Путь | Роль |
 |------|------|
-| `cli.py` | CLI: `musik scan`, `embed`, `clusters`, `worker`, … |
+| `cli.py` | CLI: `musik scan`, `embed`, `clusters`, `artwork`, `worker`, … |
 | `config.py` | настройки (`MUSIK_*`, пути к DB/cache) |
 | `db/schema.py` | базовая SQLite-схема совместимости |
 | `db/migrations.py` | пронумерованные миграции и `PRAGMA user_version` |
@@ -161,6 +162,7 @@ musik/
 | `index/clusters.py` | кластеры по cosine |
 | `brain/` | генераторы миксов / explain |
 | `discover/` | album tips и т.п. |
+| `artwork/` | пакетная загрузка обложек (iTunes) в `data/cache/artwork` |
 | `jobs/` | очередь задач + runner + progress в DB |
 | `worker/server.py` | HTTP worker `:8790` |
 | `listen/` | история / профиль (offline) |
@@ -173,7 +175,7 @@ musik/
 | `internal/config/` | env Go-плеера |
 | `internal/auth/` | пароль, cookie, Bearer, rate-limit логина |
 | `internal/db/` | SQLite access и точный schema-version gate; миграций в Go нет |
-| `internal/index/` | матрица эмбеддингов в RAM, `TopK`, `SimsTo`, fused exact scan |
+| `internal/index/` | матрица эмбеддингов в RAM, `TopK`, `SimsTo`, fused exact scan, сплит составных артистов |
 | `internal/taste/` | EMA-вкус |
 | `internal/queue/` | единое ядро очереди: candidates → features → score → select |
 | `internal/library/` | правила библиотеки: безопасные пути загрузки, группировка artist/album |
@@ -196,6 +198,17 @@ musik/
 | `bench_queue.sh` | exact scan / queue и API benchmarks (`make bench`) |
 | `sim_listener.py` | детерминированные listener-сценарии (`make sim`) |
 | `export_paper_cosine.py` | утилита для cosine-таблиц / экспериментов |
+| `musik-env.ps1` | Windows: чтение `.env`, health-проверки player/worker |
+| `start-musik.ps1` | Windows: запуск worker+player с `.env`, PID/логи, `-InstallStartup` (автозапуск при входе) |
+| `auto-scan.ps1` | Windows: плановый перескан библиотеки (`-InstallTask`, по умолчанию каждые 60 мин) |
+
+### `tools/`
+
+| Инструмент | Назначение |
+|------------|------------|
+| `cue_split.py` | нарезка CUE-образов (`.cue` + FLAC/APE/WAV) в отдельные треки (`--apply`) |
+| `cleanup_duplicates.py` | удаление файлов, помеченных как дубли (dry-run по умолчанию, `--apply`) |
+| `normalize_artists.py` | склейка вариантов имён артистов: БИ-2 → Би-2, DDT → ДДТ … (dry-run по умолчанию, `--apply`) |
 
 ### `docs/` и `tests/`
 
@@ -305,7 +318,7 @@ sqlite3 data/db/musik.db 'PRAGMA wal_checkpoint(TRUNCATE);'
    ```
 
    Повторный вызов безопасен. Player стартует только если `PRAGMA user_version`
-   совпадает с поддерживаемой версией (сейчас 5).
+   совпадает с поддерживаемой версией (сейчас 6).
 4. Запусти worker и player как обычно. Scan/embed подхватят уже посчитанное
    по MD5 файла. Пересчитаются только новые или изменённые треки.
 
@@ -365,6 +378,56 @@ musik clusters
   остальные 20 с декодировались бы впустую, а вектор одного и того же файла
   получался бы разным при каждом пересчёте. Девять окон по 10 с = те же три
   интервала, но прослушанные целиком и воспроизводимо
+
+---
+
+## Обслуживание библиотеки
+
+Разовые операции для чистоты каталога. Destructive-шаги по умолчанию делают
+dry-run — сначала посмотри вывод, потом повтори с `--apply`.
+
+### Нарезка CUE-образов
+
+Альбомные образы (`.cue` + FLAC/APE/WAV) режутся на отдельные треки, битые
+входы ретраятся, нулевые файлы и `.cue` убираются:
+
+```bash
+python tools/cue_split.py --root "M:/music"           # dry-run
+python tools/cue_split.py --root "M:/music" --apply
+```
+
+### Дубликаты: FLAC важнее MP3
+
+`musik scan` помечает копии по цепочке: одинаковый MD5 → chromaprint →
+метаданные. Группа метаданных — `artist+title+album+year+is_remaster`, и копии
+сливаются только если длительности совпадают в пределах 3 с: ремастеры,
+лайв/студийные дубли и переиздания остаются отдельными треками (флаг
+`is_remaster` берётся из «… (2001 Remastered)» в теге альбома, миграция 6).
+Внутри группы выигрывает лучший файл: сначала формат
+(FLAC > WAV/AIFF > Opus/OGG > M4A/AAC > MP3), затем битрейт и размер.
+
+```bash
+musik scan                              # пометить дубли
+python tools/cleanup_duplicates.py      # dry-run: что будет удалено
+python tools/cleanup_duplicates.py --apply   # удалить файлы с диска
+```
+
+### Составные артисты и склейка имён
+
+Кредиты вида «Thomas / Би-2 / Сплин» сплитятся при чтении каталога — трек
+показывается у каждого из артистов. Варианты написания имён (БИ-2 → Би-2,
+DDT → ДДТ, СпЛин → Сплин, табы/пробелы) склеиваются разово:
+
+```bash
+python tools/normalize_artists.py            # dry-run
+python tools/normalize_artists.py --apply    # tracks + discover_tips
+```
+
+### Обложки для треков без embedded-art
+
+```bash
+musik artwork            # iTunes API → data/cache/artwork, прогресс в лог
+```
 
 ---
 
