@@ -154,13 +154,20 @@ FORMAT_RANK_SQL = """
     END
 """
 
+# Copies whose durations differ by more than this are different takes
+# (live vs studio), even when artist, title and album agree.
+DUPLICATE_DURATION_TOLERANCE_SEC = 3.0
+
 
 def mark_duplicates() -> int:
     """Mark duplicates: same MD5, then fingerprint, then artist+title+album.
 
     The winner of a group is the finest copy: format rank first (FLAC >
     WAV/AIFF > Opus/OGG > M4A/AAC > MP3 > other), then highest bitrate,
-    then largest file (stable: lowest id). Everyone else gets is_duplicate_of
+    then largest file (stable: lowest id). Album, year and the remaster flag
+    keep originals, remasters and other editions apart, and durations must
+    agree within DUPLICATE_DURATION_TOLERANCE_SEC so live and studio takes
+    that share one title never merge. Everyone else gets is_duplicate_of
     and disappears from the catalog until cleanup removes the file.
     """
     rank = FORMAT_RANK_SQL
@@ -227,31 +234,47 @@ def mark_duplicates() -> int:
             """
         )
         # 3) same song metadata (different encodes / renames / editions).
-        # Album is part of the group key so remasters and other editions of the
-        # same song are never collapsed into one entry; year + is_remaster are
-        # the discriminators for pairs whose tags would otherwise match after
-        # album normalization (e.g. Scorpions 1979 original vs 2001 remaster).
-        marked += _mark_groups(
+        # Album, year and the remaster flag keep remasters and other editions
+        # of the same song in separate groups (e.g. Scorpions 1979 original vs
+        # 2001 remaster), and durations must agree within the tolerance so a
+        # live take never absorbs the studio one with the same tags.
+        rows = conn.execute(
             f"""
             SELECT id,
                    lower(trim(artist)) || '|' || lower(trim(title))
                        || '|' || lower(trim(COALESCE(album, '')))
                        || '|' || COALESCE(CAST(year AS TEXT), '')
                        || '|' || COALESCE(CAST(is_remaster AS TEXT), '0') AS grp,
-                   COALESCE(bitrate, 0) AS bitrate,
-                   COALESCE(file_size, 0) AS file_size
+                   duration
             FROM tracks
             WHERE is_active = 1
               AND is_duplicate_of IS NULL
               AND trim(COALESCE(artist, '')) != ''
               AND trim(COALESCE(title, '')) != ''
+              AND duration IS NOT NULL AND duration > 0
             ORDER BY lower(trim(artist)), lower(trim(title)),
                      lower(trim(COALESCE(album, ''))),
                      COALESCE(CAST(year AS TEXT), ''),
                      COALESCE(CAST(is_remaster AS TEXT), '0'), {rank},
                      bitrate DESC, file_size DESC, id ASC
             """
-        )
+        ).fetchall()
+        kept: dict[str, list[tuple[int, float]]] = {}
+        for row in rows:
+            copies = kept.setdefault(row["grp"], [])
+            best = next(
+                (tid for tid, dur in copies
+                 if abs(dur - row["duration"]) <= DUPLICATE_DURATION_TOLERANCE_SEC),
+                None,
+            )
+            if best is None:
+                copies.append((row["id"], row["duration"]))
+            else:
+                conn.execute(
+                    "UPDATE tracks SET is_duplicate_of = ?, updated_at = ? WHERE id = ?",
+                    (best, utcnow(), row["id"]),
+                )
+                marked += 1
         return marked
 
 

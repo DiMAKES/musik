@@ -46,12 +46,14 @@ func (s *Server) handleAlbums(w http.ResponseWriter, r *http.Request) {
 		Tracks       int    `json:"tracks"`
 		CoverTrackID int64  `json:"cover_track_id,omitempty"`
 		Artwork      string `json:"artwork,omitempty"`
+		Game         bool   `json:"game,omitempty"`
 	}
 	out := make([]row, 0, len(groups))
 	for _, g := range groups {
 		out = append(out, row{
 			Artist: g.Artist, Album: g.Album, Tracks: g.Tracks, CoverTrackID: g.CoverTrackID,
 			Artwork: artworkURL(g.CoverTrackID, g.HasArtwork),
+			Game:    g.Game,
 		})
 	}
 	writeJSON(w, map[string]any{"albums": out, "count": len(out)})
@@ -67,6 +69,11 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 	if tj == nil {
 		writeErr(w, 404, "not_found", "track not found")
 		return
+	}
+	if out, ok := tj.(map[string]any); ok {
+		if p, err := s.Store.TrackPassport(id); err == nil && p != nil {
+			out["passport"] = p
+		}
 	}
 	writeJSON(w, tj)
 }
