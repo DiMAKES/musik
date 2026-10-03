@@ -445,12 +445,11 @@ def collect_cues(paths: list[Path]) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    default_library = os.environ.get("MUSIK_LIBRARY", "M:/music")
     parser = argparse.ArgumentParser(
         description="Split .cue album images into per-track FLACs (dry run by default)."
     )
-    parser.add_argument("paths", nargs="*", default=[default_library],
-                        help=f"cue files or directories (default: {default_library})")
+    parser.add_argument("paths", nargs="*",
+                        help="cue files or directories (default: MUSIK_LIBRARY)")
     parser.add_argument("--apply", action="store_true",
                         help="actually encode and remove cue+image on success")
     parser.add_argument("--overwrite", action="store_true",
@@ -462,6 +461,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0,
                         help="process at most N splittable cues")
     args = parser.parse_args(argv)
+
+    if not args.paths:
+        library_root = os.environ.get("MUSIK_LIBRARY")
+        if not library_root:
+            print(
+                "error: no paths given and MUSIK_LIBRARY is not set — "
+                "pass a cue file/folder or set MUSIK_LIBRARY",
+                file=sys.stderr,
+            )
+            return 2
+        args.paths = [library_root]
 
     if shutil.which("ffprobe") is None:
         print("error: ffprobe not found on PATH", file=sys.stderr)

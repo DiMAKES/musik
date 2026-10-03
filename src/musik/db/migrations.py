@@ -576,10 +576,17 @@ def _ranker_and_explore(conn: sqlite3.Connection) -> None:
 
 
 def _remaster_marker(conn: sqlite3.Connection) -> None:
-    # The scanner strips "… (2001 Remastered)" markers from album tags so an
-    # original and its remaster share one album, and remembers that the marker
-    # was there. Dedup rules use the flag (plus year) to keep both copies.
+    # The scanner keeps the full album tag (including "… (2001 Remastered)")
+    # and records whether the marker was present. Dedup uses the flag together
+    # with album and year to keep an original and its remaster apart.
     _add_column(conn, "tracks", "is_remaster INTEGER NOT NULL DEFAULT 0")
+
+
+def _artist_segments(conn: sqlite3.Connection) -> None:
+    # Collaborator credits ("Thomas / БИ-2 / Сплин") are parsed once during the
+    # scan; the segments live here so every reader (API, UI) shows the same
+    # split and no client has to re-implement the parsing rule.
+    _add_column(conn, "tracks", "artist_segments TEXT")
 
 
 MIGRATIONS = (
@@ -589,6 +596,7 @@ MIGRATIONS = (
     Migration(4, "playlists_contexts_queue", _playlists_contexts_queue),
     Migration(5, "ranker_and_explore", _ranker_and_explore),
     Migration(6, "remaster_marker", _remaster_marker),
+    Migration(7, "artist_segments", _artist_segments),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

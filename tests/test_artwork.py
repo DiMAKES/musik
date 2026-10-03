@@ -184,3 +184,70 @@ def test_pipeline_skips_track_with_existing_cover_file(env, monkeypatch):
     result = pipeline.fetch_library_artwork(delay_sec=0)
     assert result.total == 0
     assert calls == []
+
+
+def test_fetch_cover_accepts_edition_suffix(monkeypatch):
+    monkeypatch.setattr(
+        online,
+        "_get_json",
+        lambda url, **kwargs: {
+            "results": [{"artistName": "Nickelback", "collectionName": "Curb (Remastered)",
+                         "artworkUrl100": "https://img/100x100bb.jpg"}]
+        },
+    )
+    monkeypatch.setattr(online, "_request", lambda url, **kwargs: (JPEG, "image/jpeg"))
+    assert online.fetch_cover(artist="Nickelback", album="Curb") == JPEG
+
+
+def test_fetch_cover_rejects_partial_artist(monkeypatch):
+    # "Би-2" must not match "Би-2 & Сплин" — that is another release.
+    monkeypatch.setattr(
+        online,
+        "_get_json",
+        lambda url, **kwargs: {
+            "results": [{"artistName": "Би-2 & Сплин", "collectionName": "Curb",
+                         "artworkUrl100": "https://img/100x100bb.jpg"}]
+        },
+    )
+    monkeypatch.setattr(online, "_request", lambda url, **kwargs: (JPEG, "image/jpeg"))
+    assert online.fetch_cover(artist="Би-2", album="Curb") is None
+
+
+def test_pipeline_refetches_when_artwork_file_missing(env, monkeypatch):
+    # A non-empty artwork_path pointing at a deleted file must not be skipped.
+    db, library, cache = env
+    tid = _track(library, "album/01.flac", artist="Nickelback", album="Curb", md5="gone")
+
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tracks SET artwork_path = ? WHERE id = ?",
+        (str(Path(cache) / "missing.jpg"), tid),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(pipeline, "fetch_cover", lambda **kwargs: JPEG)
+    result = pipeline.fetch_library_artwork(delay_sec=0)
+    assert (result.total, result.found, result.missing) == (1, 1, 0)
+
+
+def test_pipeline_queries_once_per_album(env, monkeypatch):
+    db, library, cache = env
+    _track(library, "album/01.flac", artist="Nickelback", album="Curb", md5="m1")
+    _track(library, "album/02.flac", artist="Nickelback", album="Curb", md5="m2")
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_fetch(**kwargs):
+        calls.append((kwargs.get("artist"), kwargs.get("album")))
+        return JPEG
+
+    monkeypatch.setattr(pipeline, "fetch_cover", fake_fetch)
+    result = pipeline.fetch_library_artwork(delay_sec=0)
+    assert len(calls) == 1  # one request for the album, not one per track
+    assert result.found == 2
+    assert (Path(cache) / "m1.jpg").read_bytes() == JPEG
+    assert (Path(cache) / "m2.jpg").read_bytes() == JPEG
+

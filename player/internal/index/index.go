@@ -21,6 +21,8 @@ type Meta struct {
 	Path         string
 	Title        string
 	Artist       string
+	// Artists holds the collaborator segments from the database (row.artists).
+	Artists      []string
 	Album        string
 	Duration     float64
 	FileMD5      string
@@ -58,9 +60,6 @@ type Index struct {
 	artistAlbums map[string][]int
 	artists      []GroupCentroid
 	albums       []GroupCentroid
-	// knownArtists holds every normalized artist label in the library; it is
-	// the guard that keeps SplitArtists from breaking solo names apart.
-	knownArtists map[string]struct{}
 	cfg          config.Config
 }
 
@@ -85,7 +84,6 @@ func New(cfg config.Config) *Index {
 		artistRows:   map[string][]int{},
 		albumRows:    map[string][]int{},
 		artistAlbums: map[string][]int{},
-		knownArtists: map[string]struct{}{},
 	}
 }
 
@@ -110,7 +108,6 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 		idx.artistRows = map[string][]int{}
 		idx.albumRows = map[string][]int{}
 		idx.artistAlbums = map[string][]int{}
-		idx.knownArtists = map[string]struct{}{}
 		idx.artists, idx.albums = nil, nil
 		idx.mu.Unlock()
 		return nil
@@ -131,13 +128,6 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 	artistAlbums := make(map[string][]int)
 	artistNames := make(map[string]string)
 	albumNames := make(map[string][2]string)
-
-	known := make(map[string]struct{}, n)
-	for _, r := range rows {
-		if key := normName(r.Artist); key != "" {
-			known[key] = struct{}{}
-		}
-	}
 
 	for i, r := range rows {
 		d := r.Dim
@@ -163,7 +153,8 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 			lastPlayed, _ = time.Parse(time.RFC3339, r.LastPlayedAt)
 		}
 		meta[i] = Meta{
-			ID: r.ID, Path: r.Path, Title: r.Title, Artist: r.Artist, Album: r.Album,
+			ID: r.ID, Path: r.Path, Title: r.Title, Artist: r.Artist,
+			Artists: r.ArtistSegments, Album: r.Album,
 			Duration: r.Duration, FileMD5: r.FileMD5, CreatedAt: created,
 			ArtworkPath: r.ArtworkPath, ClusterID: r.ClusterID,
 			Shown: r.Shown, SkipEarly: r.SkipEarly, Completed: r.Completed,
@@ -179,8 +170,11 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 			songKeyToIDs[key] = append(songKeyToIDs[key], r.ID)
 		}
 		albumKey := normName(r.Album)
-		for _, keyName := range artistKeyNames(r.Artist, known) {
-			key, name := keyName[0], keyName[1]
+		for _, name := range trackArtistNames(r.Artist, r.ArtistSegments) {
+			key := normName(name)
+			if key == "" {
+				continue
+			}
 			artistRows[key] = append(artistRows[key], i)
 			if _, ok := artistNames[key]; !ok {
 				artistNames[key] = name
@@ -214,7 +208,6 @@ func (idx *Index) Load(rows []db.TrackRow) error {
 	idx.artistRows = artistRows
 	idx.albumRows = albumRows
 	idx.artistAlbums = artistAlbums
-	idx.knownArtists = known
 	idx.artists = artists
 	idx.albums = albums
 	idx.mu.Unlock()
@@ -353,20 +346,7 @@ func (idx *Index) RowsForAlbum(artist, album string) []int {
 	return append([]int(nil), idx.artistAlbums[wantA+"\x00"+wantAl]...)
 }
 
-// KnownArtists returns every normalized artist label in the index. The map is
-// shared read-only with callers; do not modify it.
-func (idx *Index) KnownArtists() map[string]struct{} {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return idx.knownArtists
-}
-
-// SplitArtists splits an artist label into collaborator segments guarded by
-// the artists present in this index.
-func (idx *Index) SplitArtists(artist string) []string {
-	return SplitArtists(artist, idx.KnownArtists())
-}
-
+// normName lowercases and trims an artist/album key.
 func normName(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {

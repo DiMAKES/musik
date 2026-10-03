@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -34,27 +35,39 @@ def _large_artwork_url(url: str) -> str:
     return url.replace(_THUMB, _LARGE)
 
 
-def _artist_match(item: dict[str, Any], artist: str) -> int:
-    """0 = different artist, 1 = partial match, 2 = exact match."""
-    got = (item.get("artistName") or "").strip().casefold()
-    want = artist.strip().casefold()
-    if not got or not want:
-        return 0
-    if got == want:
-        return 2
-    if want in got or got in want:
-        return 1
-    return 0
+def _norm(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+# Trailing edition marker, e.g. "(Remastered)", "[Deluxe Edition]".
+_EDITION_RE = re.compile(r"\s*[(\[][^)\]]*[)\]]\s*$")
+
+
+def _edition_base(value: str) -> str:
+    base = _EDITION_RE.sub("", value).strip()
+    return base or value
+
+
+def _artist_match(item: dict[str, Any], artist: str) -> bool:
+    """Only an exact artist match is accepted.
+
+    A partial/substring match ("Би-2" inside "Би-2 & Сплин") pulls in another
+    release, so it is rejected outright.
+    """
+    got = _norm(item.get("artistName"))
+    want = _norm(artist)
+    return bool(got) and got == want
 
 
 def _album_match(item: dict[str, Any], album: str) -> int:
-    got = (item.get("collectionName") or "").strip().casefold()
-    want = album.strip().casefold()
+    """0 = no match, 1 = same album with a different edition suffix, 2 = exact."""
+    got = _norm(item.get("collectionName"))
+    want = _norm(album)
     if not got or not want:
         return 0
     if got == want:
         return 2
-    if want in got or got in want:
+    if _edition_base(got) == _edition_base(want):
         return 1
     return 0
 
@@ -88,13 +101,16 @@ def fetch_cover(*, artist: str, album: str, timeout: float = 30.0) -> bytes | No
     results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(results, list) or not results:
         return None
-    best = max(
-        results,
-        key=lambda item: (_artist_match(item, artist), _album_match(item, album)),
-    )
-    # never grab a cover from a different artist, however good the album name looks
-    if _artist_match(best, artist) == 0:
+    # Require both an exact artist and an album match (an edition suffix on
+    # either side is tolerated). Never fall back to a different artist.
+    candidates = [
+        item
+        for item in results
+        if _artist_match(item, artist) and _album_match(item, album) > 0
+    ]
+    if not candidates:
         return None
+    best = max(candidates, key=lambda item: _album_match(item, album))
     url = _large_artwork_url(
         (best.get("artworkUrl100") or best.get("artworkUrl60") or "").strip()
     )

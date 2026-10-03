@@ -42,14 +42,14 @@ func IsGameSoundtrackPath(path string) bool {
 	return false
 }
 
-func MatchArtistAlbum(gotArtist, gotAlbum, wantArtist, wantAlbum string, known map[string]struct{}) bool {
+func MatchArtistAlbum(gotArtist string, gotSegments []string, gotAlbum, wantArtist, wantAlbum string) bool {
 	if wantArtist != "" {
 		want := strings.TrimSpace(wantArtist)
 		// The raw label matches first so queries that carry a full
-		// collaboration string keep working, then each collaborator segment.
+		// collaboration string keep working, then each stored segment.
 		matched := strings.EqualFold(strings.TrimSpace(gotArtist), want)
 		if !matched {
-			for _, segment := range index.SplitArtists(gotArtist, known) {
+			for _, segment := range gotSegments {
 				if strings.EqualFold(strings.TrimSpace(segment), want) {
 					matched = true
 					break
@@ -70,18 +70,21 @@ func GroupArtists(idx *index.Index) []ArtistGroup {
 	if idx == nil {
 		return nil
 	}
-	known := idx.KnownArtists()
 	by := map[string]*ArtistGroup{}
 	n := idx.Size()
 	for i := 0; i < n; i++ {
 		m := idx.MetaAt(i)
-		name := strings.TrimSpace(m.Artist)
-		if name == "" {
-			addArtistGroup(by, "Unknown", m)
-			continue
+		names := m.Artists
+		if len(names) == 0 {
+			names = []string{strings.TrimSpace(m.Artist)}
 		}
-		for _, segment := range index.SplitArtists(name, known) {
-			addArtistGroup(by, segment, m)
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				addArtistGroup(by, "Unknown", m)
+				continue
+			}
+			addArtistGroup(by, name, m)
 		}
 	}
 	out := make([]ArtistGroup, 0, len(by))
@@ -111,7 +114,6 @@ func GroupAlbums(idx *index.Index) []AlbumGroup {
 	if idx == nil {
 		return nil
 	}
-	known := idx.KnownArtists()
 	by := map[string]*AlbumGroup{}
 	n := idx.Size()
 	for i := 0; i < n; i++ {
@@ -120,9 +122,12 @@ func GroupAlbums(idx *index.Index) []AlbumGroup {
 		if album == "" {
 			continue
 		}
-		// Group by the canonical collaborator segment so a record credited to
+		// Group by the primary collaborator segment so a record credited to
 		// several artists stays a single album entry instead of one per artist.
-		artist := index.CanonicalArtist(m.Artist, known)
+		artist := strings.TrimSpace(m.Artist)
+		if len(m.Artists) > 0 {
+			artist = strings.TrimSpace(m.Artists[0])
+		}
 		key := strings.ToLower(artist) + "\x00" + strings.ToLower(album)
 		g := by[key]
 		if g == nil {

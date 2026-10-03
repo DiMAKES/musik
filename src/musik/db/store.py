@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import numpy as np
@@ -15,6 +16,10 @@ def upsert_track(data: dict[str, Any]) -> int:
     """Insert or update track by path. Returns track id."""
     now = utcnow()
     data = {**data, "is_remaster": 1 if data.get("is_remaster") else 0}
+    segments = data.get("artist_segments")
+    data["artist_segments"] = json.dumps(
+        [str(s) for s in (segments or [])], ensure_ascii=False
+    )
     with connect() as conn:
         existing = conn.execute(
             "SELECT id FROM tracks WHERE path = ?", (data["path"],)
@@ -26,7 +31,7 @@ def upsert_track(data: dict[str, Any]) -> int:
                 UPDATE tracks SET
                     file_md5=:file_md5, file_mtime=:file_mtime, file_size=:file_size,
                     title=:title, artist=:artist, album=:album, year=:year,
-                    is_remaster=:is_remaster,
+                    is_remaster=:is_remaster, artist_segments=:artist_segments,
                     track_number=:track_number, duration=:duration, bitrate=:bitrate,
                     sample_rate=:sample_rate, channels=:channels,
                     fingerprint=:fingerprint, lufs=:lufs,
@@ -40,12 +45,12 @@ def upsert_track(data: dict[str, Any]) -> int:
                 """
                 INSERT INTO tracks (
                     path, file_md5, file_mtime, file_size, title, artist, album, year,
-                    is_remaster,
+                    is_remaster, artist_segments,
                     track_number, duration, bitrate, sample_rate, channels,
                     fingerprint, lufs, artwork_path, is_active, created_at, updated_at
                 ) VALUES (
                     :path, :file_md5, :file_mtime, :file_size, :title, :artist, :album, :year,
-                    :is_remaster,
+                    :is_remaster, :artist_segments,
                     :track_number, :duration, :bitrate, :sample_rate, :channels,
                     :fingerprint, :lufs, :artwork_path, 1, :created_at, :updated_at
                 )
@@ -408,10 +413,12 @@ def get_embedding(track_id: int) -> np.ndarray | None:
 def list_tracks_needing_artwork(
     *, limit: int | None = None, force: bool = False
 ) -> list[dict[str, Any]]:
-    """Active non-duplicate tracks whose cover file is absent (or all if force).
+    """Active non-duplicate tracks with an album to look up.
 
-    The artwork file itself is checked by the caller: artwork_path may point
-    into a container path that does not exist on this host.
+    The caller checks the artwork file itself: a stored ``artwork_path`` may be
+    empty, point at a container path, or reference a file that was deleted.
+    Both cases ("empty path" or "file missing") are handled in Python, so the
+    query never discards a row because it happens to carry a non-empty string.
     """
     sql = """
         SELECT t.id, t.file_md5, t.artist, t.album, t.artwork_path
@@ -421,8 +428,6 @@ def list_tracks_needing_artwork(
           AND trim(COALESCE(t.album, '')) != ''
           AND t.file_md5 IS NOT NULL AND t.file_md5 != ''
     """
-    if not force:
-        sql += " AND (t.artwork_path IS NULL OR t.artwork_path = '')"
     sql += " ORDER BY t.artist, t.album, t.track_number"
     if limit is not None:
         sql += f" LIMIT {int(limit)}"

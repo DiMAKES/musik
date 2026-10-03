@@ -22,14 +22,6 @@ func vec(id int64) []byte {
 	return index.Float32Bytes([]float32{1, float32(id)})
 }
 
-func knownSet(names ...string) map[string]struct{} {
-	out := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		out[index.ArtistKey(name)] = struct{}{}
-	}
-	return out
-}
-
 func artistTracks(groups []ArtistGroup, name string) int {
 	for _, g := range groups {
 		if strings.EqualFold(g.Artist, name) {
@@ -40,28 +32,24 @@ func artistTracks(groups []ArtistGroup, name string) int {
 }
 
 func TestMatchArtistAlbum(t *testing.T) {
-	known := knownSet("Massive Attack", "Portishead", "Linkin Park", "БИ-2", "Сплин")
-	if !MatchArtistAlbum("Massive Attack", "Mezzanine", " massive attack ", "", known) {
+	if !MatchArtistAlbum("Massive Attack", nil, "Mezzanine", " massive attack ", "") {
 		t.Fatal("artist match should be case-insensitive")
 	}
-	if MatchArtistAlbum("Massive Attack", "Protection", "Massive Attack", "mezzanine", known) {
+	if MatchArtistAlbum("Massive Attack", nil, "Protection", "Massive Attack", "mezzanine") {
 		t.Fatal("album mismatch should fail")
 	}
-	if !MatchArtistAlbum("Portishead", "Dummy", "", "", known) {
+	if !MatchArtistAlbum("Portishead", nil, "Dummy", "", "") {
 		t.Fatal("empty filters should match")
 	}
-	// A collaboration matches either of its performers.
-	if !MatchArtistAlbum("Linkin Park & Jay-Z", "Collision Course", "Jay-Z", "", known) {
-		t.Fatal("collaboration should match its second performer")
+	// A stored collaborator segment matches its performer.
+	if !MatchArtistAlbum("Thomas/БИ-2/Сплин", []string{"Thomas", "БИ-2", "Сплин"}, "Fellini 2001 Tour", "Сплин", "") {
+		t.Fatal("collaboration should match a stored segment")
 	}
-	if !MatchArtistAlbum("Thomas/БИ-2/Сплин", "Fellini 2001 Tour", "Сплин", "", known) {
-		t.Fatal("collaboration should match its second performer")
+	// A band name is stored whole and must not match a separator part.
+	if MatchArtistAlbum("Король и Шут", []string{"Король и Шут"}, "Ангел-Демон", "Король", "") {
+		t.Fatal("band name should not match on a part")
 	}
-	// A band name that only looks like a collaboration must not match a part.
-	if MatchArtistAlbum("Король и Шут", "Ангел-Демон", "Король", "", known) {
-		t.Fatal("band name should not match on a separator part")
-	}
-	if !MatchArtistAlbum("Король и Шут", "Ангел-Демон", "Король и Шут", "", known) {
+	if !MatchArtistAlbum("Король и Шут", []string{"Король и Шут"}, "Ангел-Демон", "Король и Шут", "") {
 		t.Fatal("band name should match as a whole")
 	}
 }
@@ -73,18 +61,19 @@ func TestGroupArtistsAndAlbums(t *testing.T) {
 		{ID: 3, Title: "Three", Artist: "Portishead", Album: "Dummy", Embedding: vec(3), Dim: 2},
 		{ID: 4, Title: "Four", Artist: "", Album: "", Embedding: vec(4), Dim: 2},
 		{ID: 5, Title: "Five", Artist: "Linkin Park", Album: "Meteora", Embedding: vec(5), Dim: 2},
-		{ID: 6, Title: "Six", Artist: "Linkin Park & Jay-Z", Album: "Collision Course", Embedding: vec(6), Dim: 2},
-		{ID: 7, Title: "Seven", Artist: "Thomas/БИ-2/Сплин", Album: "Fellini 2001 Tour", Embedding: vec(7), Dim: 2},
-		{ID: 8, Title: "Eight", Artist: "Король и Шут", Album: "Ангел-Демон", Embedding: vec(8), Dim: 2},
+		{ID: 6, Title: "Six", Artist: "Linkin Park & Jay-Z", ArtistSegments: []string{"Linkin Park & Jay-Z"}, Album: "Collision Course", Embedding: vec(6), Dim: 2},
+		{ID: 7, Title: "Seven", Artist: "Thomas/БИ-2/Сплин", ArtistSegments: []string{"Thomas", "БИ-2", "Сплин"}, Album: "Fellini 2001 Tour", Embedding: vec(7), Dim: 2},
+		{ID: 8, Title: "Eight", Artist: "Король и Шут", ArtistSegments: []string{"Король и Шут"}, Album: "Ангел-Демон", Embedding: vec(8), Dim: 2},
 		{ID: 9, Title: "Nine", Artist: "БИ-2", Album: "Город золота", Embedding: vec(9), Dim: 2},
 		{ID: 10, Title: "Ten", Artist: "Сплин", Album: "Гранатовый альбом", Embedding: vec(10), Dim: 2},
 	})
 
 	artists := GroupArtists(idx)
-	// Massive Attack, Portishead, Unknown, Linkin Park, Jay-Z, Thomas, БИ-2,
-	// Сплин and Король и Шут — every segment, but no combination label.
+	// Massive Attack, Portishead, Unknown, Linkin Park, "Linkin Park & Jay-Z",
+	// Thomas, БИ-2, Сплин and Король и Шут — every stored segment, and amp/band
+	// names kept whole.
 	want := []string{
-		"Massive Attack", "Portishead", "Unknown", "Linkin Park", "Jay-Z",
+		"Massive Attack", "Portishead", "Unknown", "Linkin Park", "Linkin Park & Jay-Z",
 		"Thomas", "БИ-2", "Сплин", "Король и Шут",
 	}
 	if len(artists) != len(want) {
@@ -95,25 +84,14 @@ func TestGroupArtistsAndAlbums(t *testing.T) {
 			t.Fatalf("missing artist group %q in %+v", name, artists)
 		}
 	}
-	for _, g := range artists {
-		if strings.ContainsAny(g.Artist, "&/") {
-			t.Fatalf("combination artist group should not exist: %+v", g)
-		}
-	}
 	if n := artistTracks(artists, "Massive Attack"); n != 2 {
 		t.Fatalf("Massive Attack tracks=%d, want 2", n)
 	}
-	covered := false
-	for _, g := range artists {
-		if g.HasArtwork && strings.EqualFold(g.Artist, "Massive Attack") {
-			covered = true
-		}
+	if n := artistTracks(artists, "Linkin Park"); n != 1 {
+		t.Fatalf("Linkin Park tracks=%d, want 1 (the & credit is not split)", n)
 	}
-	if !covered {
-		t.Fatalf("Massive Attack group should carry the cover: %+v", artists)
-	}
-	if n := artistTracks(artists, "Linkin Park"); n != 2 {
-		t.Fatalf("Linkin Park tracks=%d, want solo record plus collaboration", n)
+	if artistTracks(artists, "Jay-Z") != 0 {
+		t.Fatalf("Jay-Z should not appear: & is not a separator")
 	}
 	if n := artistTracks(artists, "БИ-2"); n != 2 || artistTracks(artists, "Сплин") != 2 {
 		t.Fatalf("Би-2/Сплин groups wrong: %+v", artists)
@@ -123,29 +101,30 @@ func TestGroupArtistsAndAlbums(t *testing.T) {
 	}
 
 	albums := GroupAlbums(idx)
-	// Mezzanine, Protection, Dummy, Meteora, Collision Course (under Linkin
-	// Park), Fellini 2001 Tour (under БИ-2), Ангел-Демон, Город золота and
-	// Гранатовый альбом.
 	if len(albums) != 9 {
 		t.Fatalf("albums=%d, want 9: %+v", len(albums), albums)
-	}
-	for _, al := range albums {
-		if strings.ContainsAny(al.Artist, "&/") {
-			t.Fatalf("album should not be grouped under a combination artist: %+v", al)
-		}
 	}
 	byAlbum := map[string]AlbumGroup{}
 	for _, al := range albums {
 		byAlbum[al.Album] = al
 	}
-	if g := byAlbum["Collision Course"]; g.Artist != "Linkin Park" || g.Tracks != 1 {
+	if g := byAlbum["Collision Course"]; g.Artist != "Linkin Park & Jay-Z" || g.Tracks != 1 {
 		t.Fatalf("Collision Course grouped as %+v", g)
 	}
-	if g := byAlbum["Fellini 2001 Tour"]; g.Artist != "БИ-2" || g.Tracks != 1 {
+	if g := byAlbum["Fellini 2001 Tour"]; g.Artist != "Thomas" || g.Tracks != 1 {
 		t.Fatalf("Fellini 2001 Tour grouped as %+v", g)
 	}
 	if g := byAlbum["Ангел-Демон"]; g.Artist != "Король и Шут" {
 		t.Fatalf("Ангел-Демон grouped as %+v", g)
+	}
+	covered := false
+	for _, g := range artists {
+		if g.HasArtwork && strings.EqualFold(g.Artist, "Massive Attack") {
+			covered = true
+		}
+	}
+	if !covered {
+		t.Fatalf("Massive Attack group should carry the cover: %+v", artists)
 	}
 }
 

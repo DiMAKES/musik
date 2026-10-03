@@ -336,53 +336,32 @@ function wireAllShelves() {
   });
 }
 
-// Mirrors index.SplitArtists: conservative collaborator separators, and a
-// label only splits when one of its segments already exists as an artist —
-// that keeps "Король и Шут" whole while "Thomas/БИ-2/Сплин" resolves.
-const ARTIST_SEP_RE = /\s*[/;]\s*|\s*&\s*|\s+(?:feat\.?|ft\.?|x|и)\s+/gi;
-
-function splitArtistParts(value) {
-  return String(value || "")
-    .split(ARTIST_SEP_RE)
-    .map((part) => part.trim())
-    .filter(Boolean);
+// Collaborator segments are parsed once at scan time and delivered by the API
+// (row.artists). The UI never re-splits a credit — it only shows what it got.
+function trackArtists(t) {
+  const list = Array.isArray(t?.artists)
+    ? t.artists.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
+  if (list.length) return list;
+  const raw = String(t?.artist || "").trim();
+  return raw ? [raw] : [];
 }
 
-function knownArtistNames(tracks) {
-  const known = new Set();
-  for (const t of tracks || []) {
-    const name = (t.artist || "").trim().toLowerCase();
-    if (name) known.add(name);
-  }
-  return known;
-}
-
-function splitArtists(value, known) {
-  const whole = String(value || "").trim();
-  const parts = splitArtistParts(value);
-  if (parts.length < 2) return [whole];
-  if (parts.some((part) => known.has(part.toLowerCase()))) return parts;
-  return [whole];
-}
-
-function canonicalArtist(value, known) {
-  const parts = splitArtists(value, known);
-  for (const part of parts) {
-    if (known.has(part.toLowerCase())) return part;
-  }
-  return parts[0] || "";
+function primaryArtist(t) {
+  return trackArtists(t)[0] || String(t?.artist || "").trim();
 }
 
 async function loadFavorites() {
   try {
     const data = await api("/api/favorites");
-    const known = knownArtistNames(library);
     favoriteIds = new Set((data.ids || []).map(Number));
     favoriteArtists = new Set(
-      (data.artists || []).map((a) => canonicalArtist(a.artist, known))
+      (data.artists || []).map((a) => String(a.artist || "").trim()).filter(Boolean)
     );
     favoriteAlbums = new Set(
-      (data.albums || []).map((a) => albumKey(canonicalArtist(a.artist, known), a.album))
+      (data.albums || [])
+        .map((a) => albumKey(String(a.artist || "").trim(), a.album))
+        .filter((k) => !k.startsWith("\0"))
     );
     return data;
   } catch (_) {
@@ -408,10 +387,9 @@ function setEntityFavChips() {
     if (b) b.classList.remove("on");
     return;
   }
-  const known = knownArtistNames(library);
-  const artistName = canonicalArtist(current.artist, known);
-  if (a) a.classList.toggle("on", favoriteArtists.has(artistName));
-  if (b) b.classList.toggle("on", favoriteAlbums.has(albumKey(artistName, current.album)));
+  const artistOn = trackArtists(current).some((s) => favoriteArtists.has(s));
+  if (a) a.classList.toggle("on", artistOn);
+  if (b) b.classList.toggle("on", favoriteAlbums.has(albumKey(primaryArtist(current), current.album)));
 }
 
 async function toggleFavorite(payload, { withLike = true } = {}) {
@@ -421,9 +399,7 @@ async function toggleFavorite(payload, { withLike = true } = {}) {
       : payload;
   if (!body.type) body.type = "track";
   if (body.type === "artist" || body.type === "album") {
-    // Entity favorites are keyed by the canonical collaborator segment so a
-    // record credited to several artists keeps a single favorite entry.
-    body.artist = canonicalArtist(body.artist, knownArtistNames(library));
+    body.artist = String(body.artist || "").trim();
   }
   const data = await api("/api/favorites/toggle", {
     method: "POST",
@@ -437,13 +413,13 @@ async function toggleFavorite(payload, { withLike = true } = {}) {
     toast(data.favorited ? "Любимая песня" : "Песня убрана из любимых");
     if (data.favorited && withLike) postEvent("like").catch(() => {});
   } else if (data.type === "artist" || body.type === "artist") {
-    const name = canonicalArtist(data.artist || body.artist, knownArtistNames(library));
+    const name = String(data.artist || body.artist || "").trim();
     if (data.favorited) favoriteArtists.add(name);
     else favoriteArtists.delete(name);
     toast(data.favorited ? "Любимый артист" : "Артист убран");
   } else if (data.type === "album" || body.type === "album") {
     const key = albumKey(
-      canonicalArtist(data.artist || body.artist, knownArtistNames(library)),
+      String(data.artist || body.artist || "").trim(),
       data.album || body.album
     );
     if (data.favorited) favoriteAlbums.add(key);
@@ -459,10 +435,9 @@ async function toggleFavorite(payload, { withLike = true } = {}) {
 function groupCatalog(tracks) {
   const artists = new Map();
   const albums = new Map();
-  const known = knownArtistNames(tracks);
   for (const t of tracks) {
-    const raw = (t.artist || "").trim();
-    for (const artist of raw ? splitArtists(raw, known) : ["Unknown"]) {
+    const segments = trackArtists(t);
+    for (const artist of segments.length ? segments : ["Unknown"]) {
       if (!artists.has(artist)) {
         artists.set(artist, { artist, tracks: 0, cover: t.artwork || null, sampleId: t.id });
       }
@@ -473,7 +448,7 @@ function groupCatalog(tracks) {
 
     const album = (t.album || "").trim();
     if (!album) continue;
-    const albumArtist = canonicalArtist(raw, known) || "Unknown";
+    const albumArtist = primaryArtist(t) || "Unknown";
     const key = albumArtist + "\0" + album;
     if (!albums.has(key)) {
       albums.set(key, {
@@ -560,23 +535,17 @@ function fillSortSelect(el, tab, current) {
 
 function tracksOfArtist(artist) {
   const name = (artist || "Unknown").trim() || "Unknown";
-  const known = knownArtistNames(library);
-  return library.filter((t) => {
-    const raw = ((t.artist || "Unknown").trim() || "Unknown");
-    if (raw.toLowerCase() === name.toLowerCase()) return true;
-    return splitArtists(raw, known).some((seg) => seg.toLowerCase() === name.toLowerCase());
-  });
+  return library.filter((t) =>
+    trackArtists(t).some((seg) => seg.toLowerCase() === name.toLowerCase())
+  );
 }
 
 function tracksOfAlbum(artist, album) {
   const a = (artist || "").trim().toLowerCase();
   const al = (album || "").trim();
-  const known = knownArtistNames(library);
   return library.filter((t) => {
     if ((t.album || "").trim() !== al) return false;
-    const raw = (t.artist || "").trim();
-    if (raw.toLowerCase() === a) return true;
-    return splitArtists(raw, known).some((seg) => seg.toLowerCase() === a);
+    return trackArtists(t).some((seg) => seg.toLowerCase() === a);
   });
 }
 
@@ -720,14 +689,6 @@ function wireMediaSession() {
   });
   set("previoustrack", () => backTrack());
   set("nexttrack", () => skipTrack());
-  set("like", () => {
-    if (!current?.id) return;
-    toggleFavorite({ type: "track", track_id: current.id });
-  });
-  set("dislike", () => {
-    if (!current?.id) return;
-    postEvent("dislike", { track_id: current.id });
-  });
   set("seekto", (d) => {
     const audio = $("audio");
     if (!d || typeof d.seekTime !== "number" || !Number.isFinite(d.seekTime)) return;

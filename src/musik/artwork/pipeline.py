@@ -27,9 +27,10 @@ class ArtworkResult:
     errors: list[str] = field(default_factory=list)
 
 
-def save_cover(file_md5: str, data: bytes) -> str:
+def save_cover(file_md5: str, data: bytes, *, overwrite: bool = True) -> str:
     out = get_settings().artwork_cache / f"{file_md5}.jpg"
-    out.write_bytes(data)
+    if overwrite or not out.exists():
+        out.write_bytes(data)
     return str(out)
 
 
@@ -42,54 +43,72 @@ def fetch_library_artwork(
 ) -> ArtworkResult:
     tracks = list_tracks_needing_artwork(limit=limit, force=force)
     if not force:
-        # artwork_path may be stale (container path, deleted cache file)
+        # A stored artwork_path may be empty, point at a container path, or
+        # reference a deleted file. Re-fetch only when the cover is really gone.
         tracks = [
             t
             for t in tracks
             if not t.get("artwork_path") or not Path(str(t["artwork_path"])).is_file()
         ]
+
     result = ArtworkResult(total=len(tracks))
     if not tracks:
         console.print("[yellow]Нечего качать — обложки уже есть или библиотека пуста.[/yellow]")
         return result
 
+    # One iTunes request per album, not per track. Key keeps the artist case
+    # so the printed label stays readable; insertion order is preserved.
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for t in tracks:
+        key = (str(t.get("artist") or ""), str(t.get("album") or ""))
+        groups.setdefault(key, []).append(t)
+
+    done = 0
+
+    def _progress(description: str) -> None:
+        if on_progress is not None:
+            pct = round(100.0 * done / len(tracks), 1) if tracks else 100.0
+            on_progress(
+                {
+                    "phase": "artwork",
+                    "done": done,
+                    "total": len(tracks),
+                    "pct": pct,
+                    "message": description,
+                }
+            )
+
     with Progress(console=console) as progress:
         task = progress.add_task("Artwork", total=len(tracks))
-        for i, t in enumerate(tracks, start=1):
-            tid = int(t["id"])
+        for (artist, album), group in groups.items():
             try:
-                hit = fetch_cover(
-                    artist=t.get("artist") or "",
-                    album=t.get("album") or "",
-                )
-                if hit is None:
-                    result.missing += 1
-                else:
-                    path = save_cover(str(t["file_md5"]), hit)
-                    save_artwork_path(tid, path)
-                    result.found += 1
+                hit = fetch_cover(artist=artist, album=album)
             except Exception as e:  # noqa: BLE001
-                logger.exception("artwork failed track_id=%s", tid)
-                result.failed += 1
-                result.errors.append(f"{tid}: {e}")
-
-            if on_progress is not None:
-                on_progress(
-                    {
-                        "phase": "artwork",
-                        "done": i,
-                        "total": len(tracks),
-                        "pct": round(100.0 * i / len(tracks), 1),
-                        "message": (
-                            f"artwork {i}/{len(tracks)} · "
-                            f"found={result.found} missing={result.missing} fail={result.failed}"
-                        ),
-                    }
-                )
+                logger.exception("artwork failed album=%s — %s", artist, album)
+                result.failed += len(group)
+                result.errors.append(f"{artist} — {album}: {e}")
+                hit = None
+            if hit is None:
+                result.missing += len(group)
+            else:
+                for t in group:
+                    try:
+                        path = save_cover(str(t["file_md5"]), hit, overwrite=force)
+                        save_artwork_path(int(t["id"]), path)
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception("artwork save failed track_id=%s", t.get("id"))
+                        result.failed += 1
+                        result.errors.append(f"{t.get('id')}: {e}")
+                result.found += len(group)
+            done += len(group)
             progress.update(
                 task,
-                advance=1,
+                advance=len(group),
                 description=f"Artwork · found={result.found} miss={result.missing}",
+            )
+            _progress(
+                f"artwork {done}/{len(tracks)} · album {artist} — {album} · "
+                f"found={result.found} missing={result.missing} fail={result.failed}"
             )
             throttle(delay_sec)
 
