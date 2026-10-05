@@ -39,7 +39,7 @@ final class Settings: @unchecked Sendable {
         return id
     }
 
-    var deviceId: String {
+    @MainActor var deviceId: String {
         let d = UIDevice.current
         return "\(d.model) \(d.systemName) \(d.systemVersion)"
     }
