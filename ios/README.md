@@ -81,3 +81,4 @@ cd ios && xcodegen generate && open Musik.xcodeproj
 Структура: `Musik/App` (точка входа, AppState), `Musik/Core` (API-клиент,
 модели, Keychain, загрузка обложек), `Musik/Playback` (PlayerController на
 AVPlayer + MediaPlayer), `Musik/Views` (экраны SwiftUI).
+
