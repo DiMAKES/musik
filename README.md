@@ -109,6 +109,7 @@ musik/
 │
 ├── docs/                     ← документация
 ├── scripts/                  ← утилиты
+├── tools/                    ← разовые инструменты библиотеки (CUE, дубли, артисты)
 ├── src/musik/                ← Python: scan / embed / jobs / worker
 ├── player/                   ← Go: API + UI
 ├── mobile/README.md          ← контракт отдельного Flutter-клиента
@@ -148,7 +149,7 @@ musik/
 
 | Путь | Роль |
 |------|------|
-| `cli.py` | CLI: `musik scan`, `embed`, `clusters`, `worker`, … |
+| `cli.py` | CLI: `musik scan`, `embed`, `clusters`, `artwork`, `worker`, … |
 | `config.py` | настройки (`MUSIK_*`, пути к DB/cache) |
 | `db/schema.py` | базовая SQLite-схема совместимости |
 | `db/migrations.py` | пронумерованные миграции и `PRAGMA user_version` |
@@ -161,6 +162,7 @@ musik/
 | `index/clusters.py` | кластеры по cosine |
 | `brain/` | генераторы миксов / explain |
 | `discover/` | album tips и т.п. |
+| `artwork/` | пакетная загрузка обложек (iTunes) в `data/cache/artwork` |
 | `jobs/` | очередь задач + runner + progress в DB |
 | `worker/server.py` | HTTP worker `:8790` |
 | `listen/` | история / профиль (offline) |
@@ -196,6 +198,16 @@ musik/
 | `bench_queue.sh` | exact scan / queue и API benchmarks (`make bench`) |
 | `sim_listener.py` | детерминированные listener-сценарии (`make sim`) |
 | `export_paper_cosine.py` | утилита для cosine-таблиц / экспериментов |
+| `musik-env.ps1` | Windows: чтение `.env`, health-проверки player/worker |
+| `start-musik.ps1` | Windows: запуск worker+player с `.env`, PID/логи, `-InstallStartup` (автозапуск при входе) |
+| `auto-scan.ps1` | Windows: плановый перескан библиотеки (`-InstallTask`, по умолчанию каждые 60 мин) |
+
+### `tools/`
+
+| Инструмент | Назначение |
+|------------|------------|
+| `cue_split.py` | нарезка CUE-образов (`.cue` + FLAC/APE/WAV) в отдельные треки (`--apply`) |
+| `cleanup_duplicates.py` | удаление файлов, помеченных как дубли (dry-run по умолчанию, `--apply`) |
 
 ### `docs/` и `tests/`
 
@@ -370,6 +382,22 @@ musik clusters
 
 ## Обслуживание библиотеки
 
+Разовые операции для чистоты каталога. Destructive-шаги по умолчанию делают
+dry-run — сначала посмотри вывод, потом повтори с `--apply`.
+
+### Нарезка CUE-образов
+
+Альбомные образы (`.cue` + FLAC/APE/WAV) режутся на отдельные треки, битые
+входы ретраятся, нулевые файлы и `.cue` убираются:
+
+```bash
+python tools/cue_split.py "M:/music"           # dry-run
+python tools/cue_split.py "M:/music" --apply
+```
+
+Если пути не переданы, берётся `MUSIK_LIBRARY`. Когда не задано ни то, ни
+другое, инструмент останавливается — чужой диск по умолчанию он не читает.
+
 ### Дубликаты: FLAC важнее MP3
 
 `musik scan` помечает копии по цепочке: одинаковый MD5 → chromaprint →
@@ -382,6 +410,12 @@ musik clusters
 лучший файл: сначала формат (FLAC > WAV/AIFF > Opus/OGG > M4A/AAC > MP3), затем
 битрейт и размер.
 
+```bash
+musik scan                              # пометить дубли
+python tools/cleanup_duplicates.py      # dry-run: что будет удалено
+python tools/cleanup_duplicates.py --apply   # удалить файлы с диска
+```
+
 ### Составные артисты
 
 Кредит вида «Thomas / БИ-2 / Сплин» разбирается **один раз при скане**, и
@@ -391,6 +425,18 @@ musik clusters
 «Король и Шут» и «Earth, Wind & Fire» остаются целыми, а подстрока «Би-2»
 внутри «Би-2 & Сплин» не цепляет чужой релиз. Варианты написания имён
 (БИ-2 → Би-2) не переписываются — имя берётся из тега файла.
+
+### Обложки для треков без embedded-art
+
+```bash
+musik artwork            # iTunes API → data/cache/artwork/{md5}.jpg
+```
+
+Отдельная команда, не шаг скана. Один запрос на альбом (не на каждый трек);
+артист должен совпасть целиком, альбом — целиком плюс суффикс издания вроде
+«(Remastered)». Кеш — `data/cache/artwork/{md5}.jpg`. Обложка перекачивается
+только если `artwork_path` пуст **или файла на диске нет**; `--force`
+перекачивает всё.
 
 ---
 

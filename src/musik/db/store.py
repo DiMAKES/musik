@@ -408,3 +408,36 @@ def get_embedding(track_id: int) -> np.ndarray | None:
         if dim and arr.size != dim:
             return arr.astype(np.float32)
         return np.asarray(arr, dtype=np.float32)
+
+
+def list_tracks_needing_artwork(
+    *, limit: int | None = None, force: bool = False
+) -> list[dict[str, Any]]:
+    """Active non-duplicate tracks with an album to look up.
+
+    The caller checks the artwork file itself: a stored ``artwork_path`` may be
+    empty, point at a container path, or reference a file that was deleted.
+    Both cases ("empty path" or "file missing") are handled in Python, so the
+    query never discards a row because it happens to carry a non-empty string.
+    """
+    sql = """
+        SELECT t.id, t.file_md5, t.artist, t.album, t.artwork_path
+        FROM tracks t
+        WHERE t.is_active = 1 AND COALESCE(t.is_duplicate_of, 0) = 0
+          AND trim(COALESCE(t.artist, '')) != ''
+          AND trim(COALESCE(t.album, '')) != ''
+          AND t.file_md5 IS NOT NULL AND t.file_md5 != ''
+    """
+    sql += " ORDER BY t.artist, t.album, t.track_number"
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(sql).fetchall()]
+
+
+def save_artwork_path(track_id: int, path: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE tracks SET artwork_path = ?, updated_at = ? WHERE id = ?",
+            (path, utcnow(), track_id),
+        )
