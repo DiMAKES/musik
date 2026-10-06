@@ -91,7 +91,8 @@ func (s *Server) staticHandler() http.Handler {
 		}
 		setStaticCacheControl(w, r.URL.Path)
 		if r.URL.Path == "/" || r.URL.Path == "" {
-			f, err := s.Static.Open("index.html")
+			page := s.uiPage(r)
+			f, err := s.Static.Open(page)
 			if err != nil {
 				http.NotFound(w, r)
 				return
@@ -104,16 +105,31 @@ func (s *Server) staticHandler() http.Handler {
 			}
 			rs, ok := f.(io.ReadSeeker)
 			if !ok {
-				r.URL.Path = "/index.html"
+				r.URL.Path = "/" + page
 				fileServer.ServeHTTP(w, r)
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			http.ServeContent(w, r, "index.html", modTime(stat), rs)
+			// The same URL serves either interface; caches must key on the cookie.
+			w.Header().Add("Vary", "Cookie")
+			http.ServeContent(w, r, page, modTime(stat), rs)
 			return
 		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// uiPage picks the interface for "/": the musik_ui cookie set from the
+// interface switch, else MUSIK_UI, else the original interface.
+func (s *Server) uiPage(r *http.Request) string {
+	choice := s.Cfg.UI
+	if c, err := r.Cookie("musik_ui"); err == nil {
+		choice = c.Value
+	}
+	if choice == "mozgolika" {
+		return "mozgolika.html"
+	}
+	return "index.html"
 }
 
 func setStaticCacheControl(w http.ResponseWriter, path string) {
@@ -130,11 +146,11 @@ func staticCacheControl(path string) string {
 		return "public, max-age=604800"
 	}
 	switch path {
-	case "/", "", "/index.html":
+	case "/", "", "/index.html", "/mozgolika.html":
 		// Revalidate the page itself: with max-age=3600 a browser keeps an old
 		// index.html (and the app.js it pairs with) for up to an hour after a deploy.
 		return "no-cache"
-	case "/app.js", "/style.css", "/fonts.css":
+	case "/app.js", "/style.css", "/fonts.css", "/redesign.css":
 		// Revalidate with the page. max-age kept a stale UI for an hour after a refresh.
 		return "no-cache"
 	default:
@@ -222,7 +238,7 @@ func (s *Server) staticVersion() string {
 		return ""
 	}
 	h := sha256.New()
-	for _, name := range []string{"index.html", "app.js", "style.css"} {
+	for _, name := range []string{"index.html", "mozgolika.html", "app.js", "style.css", "redesign.css"} {
 		f, err := s.Static.Open(name)
 		if err != nil {
 			continue

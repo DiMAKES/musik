@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#101114" />
+  <script>
+    (function () {
+      try {
+        var saved = JSON.parse(localStorage.getItem("musik_theme") || "null");
+        if (saved && saved.id === "omarchy") { saved.id = "retro"; localStorage.setItem("musik_theme", JSON.stringify(saved)); }
+        if (!saved || !saved.id || saved.id === "ember") return;
+        var root = document.documentElement;
+        if (/^[a-z][a-z0-9-]{0,31}$/.test(saved.id)) root.dataset.theme = saved.id;
+        else if (saved.tokens) {
+          root.dataset.theme = "custom";
+          Object.keys(saved.tokens).forEach(function (key) {
+            var value = saved.tokens[key];
+            if (key.slice(0, 2) === "--" && typeof value === "string" && value.length < 180 && !/[;{}]|url\s*\(|expression\s*\(/i.test(value)) root.style.setProperty(key, value);
+          });
+          if (saved.scheme === "light") root.classList.add("theme-light");
+        }
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta && saved.color) meta.setAttribute("content", saved.color);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="musik" />
+  <title>musik</title>
+  <link rel="stylesheet" href="/fonts.css?v=e54fa79d7a" />
+  <link rel="stylesheet" href="/themes/base.css" />
+  <link rel="stylesheet" href="/style.css?v=fe7eb12cb4" />
+  <script>try { var savedTheme=JSON.parse(localStorage.getItem("musik_theme")||"null"); if(savedTheme&&savedTheme.id&&savedTheme.id!=="ember"&&/^[a-z][a-z0-9-]{0,31}$/.test(savedTheme.id)) document.write('<link rel="stylesheet" href="/themes/'+savedTheme.id+'.css?v=retro4">'); } catch(e) {};</script>
+  <link rel="stylesheet" href="/redesign.css?v=90a395b7cf" />
+</head>
+<body>
+  <div id="login-gate" class="login-gate" hidden>
+    <form id="login-form" class="login-card" autocomplete="current-password">
+      <div class="brand">musik</div>
+      <p class="tagline">Введи пароль, чтобы открыть библиотеку</p>
+      <label class="sr-only" for="login-password">Пароль</label>
+      <input id="login-password" type="password" name="password" placeholder="Пароль" required autofocus />
+      <button type="submit" class="btn primary" id="login-submit">Войти</button>
+      <p class="login-error" id="login-error" hidden></p>
+    </form>
+  </div>
+
+  <div class="shell" id="app-shell">
+    <header class="top">
+      <div class="brand-block">
+        <div class="brand">musik<span class="brand-dot">.</span></div>
+        <p class="tagline" id="maturity">твой локальный микс</p>
+      </div>
+      <nav class="tabs" aria-label="Разделы">
+        <button type="button" class="tab active" data-view="home" data-nav="listen" aria-current="page"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12h.01M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19.1 4.9a10 10 0 0 1 0 14.2M4.9 19.1a10 10 0 0 1 0-14.2"/></svg><span>Слушать</span></button>
+        <button type="button" class="tab" data-view="library" data-nav="search" data-lib-default="tracks"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>Поиск</span></button>
+        <button type="button" class="tab" data-view="library" data-nav="collection" data-lib-default="albums"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16M9 4v16M14 5l5 15"/></svg><span>Коллекция</span></button>
+        <button type="button" class="tab" data-view="profile" data-nav="me"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span>Я</span></button>
+        <span class="tabs-divider" aria-hidden="true"></span>
+        <button type="button" class="tab tab-secondary" data-view="player" data-nav="now">Сейчас играет</button>
+        <button type="button" class="tab tab-secondary" data-view="collections" data-nav="collection">Плейлисты</button>
+        <button type="button" class="tab tab-secondary" data-view="upload" data-nav="me">Загрузка</button>
+        <button type="button" class="tab logout-tab" id="btn-logout" title="Выйти из аккаунта" hidden>Выйти</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="view-home" class="view active">
+        <div class="home-intro">
+          <div class="home-copy">
+            <span class="eyebrow">Радио под тебя</span>
+            <h1>Поставить что-нибудь в&nbsp;твоём духе</h1>
+            <p>Учится на лайках и скипах. Выбери настроение — или просто жми «Слушать».</p>
+          </div>
+          <div class="home-actions">
+            <button type="button" class="btn primary hero-play" id="btn-radio"><svg class="glyph" viewBox="8.75 5.5 10 13" width="12" height="16" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg>Слушать радио</button>
+            <button type="button" class="btn" id="btn-share-radio" title="Ссылка для VLC, браузера или телефона">Поделиться</button>
+            <button type="button" class="btn quiet" id="btn-refresh-mixes">
+              <span id="refresh-label">Обновить миксы</span>
+            </button>
+          </div>
+          <div class="home-moods" id="home-moods" aria-label="Настроения"></div>
+          <div class="home-taste" id="home-taste" aria-label="Сейчас в профиле"></div>
+          <div class="home-status">
+            <p class="status-line" id="job-status" hidden></p>
+            <p class="status-line" id="share-url-line" hidden></p>
+          </div>
+        </div>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Для тебя</h2>
+            <span class="shelf-hint" id="mix-hint"></span>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="mix-cards" aria-label="Назад">‹</button>
+            <div class="shelf-row" id="mix-cards"></div>
+            <button type="button" class="shelf-nav next" data-for="mix-cards" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf" id="games-shelf" hidden>
+          <div class="shelf-head">
+            <h2>Полка игр</h2>
+            <div class="shelf-head-actions">
+              <button type="button" class="text-link" data-lib-tab="games">все саундтреки</button>
+            </div>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-games" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth game-row" id="home-games"></div>
+            <button type="button" class="shelf-nav next" data-for="home-games" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Дни недели</h2>
+            <span class="shelf-hint">сегодня подсвечен</span>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="weekday-cards" aria-label="Назад">‹</button>
+            <div class="shelf-row" id="weekday-cards"></div>
+            <button type="button" class="shelf-nav next" data-for="weekday-cards" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Любимые песни</h2>
+            <span class="shelf-hint" id="fav-hint">♥ в плеере</span>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-favorites" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-favorites"></div>
+            <button type="button" class="shelf-nav next" data-for="home-favorites" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Любимые артисты</h2>
+            <span class="shelf-hint">♥ на карточке артиста</span>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-fav-artists" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-fav-artists"></div>
+            <button type="button" class="shelf-nav next" data-for="home-fav-artists" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Любимые альбомы</h2>
+            <span class="shelf-hint">♥ на карточке альбома</span>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-fav-albums" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-fav-albums"></div>
+            <button type="button" class="shelf-nav next" data-for="home-fav-albums" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Похожее на любимое</h2>
+            <span class="shelf-hint" id="rec-hint">по звучанию</span>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-similar" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-similar"></div>
+            <button type="button" class="shelf-nav next" data-for="home-similar" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Артисты</h2>
+            <div class="shelf-head-actions">
+              <button type="button" class="text-link" data-lib-tab="artists">все артисты</button>
+            </div>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-artists" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-artists"></div>
+            <button type="button" class="shelf-nav next" data-for="home-artists" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Альбомы</h2>
+            <div class="shelf-head-actions">
+              <button type="button" class="text-link" data-lib-tab="albums">все альбомы</button>
+            </div>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-albums" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-albums"></div>
+            <button type="button" class="shelf-nav next" data-for="home-albums" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head">
+            <h2>Треки</h2>
+            <button type="button" class="text-link" data-lib-tab="tracks">вся библиотека</button>
+          </div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="home-tracks" aria-label="Назад">‹</button>
+            <div class="shelf-row smooth" id="home-tracks"></div>
+            <button type="button" class="shelf-nav next" data-for="home-tracks" aria-label="Вперёд">›</button>
+          </div>
+        </section>
+
+        <section class="shelf">
+          <div class="shelf-head"><h2>Открытия</h2></div>
+          <div class="shelf-rail">
+            <button type="button" class="shelf-nav prev" data-for="discover-cards" aria-label="Назад">‹</button>
+            <div class="shelf-row" id="discover-cards">
+              <button type="button" class="mix-card tone-b" id="btn-discover-new" data-tips="new">
+                <div class="cover-blob blob-a"></div>
+                <strong>Новые альбомы</strong>
+                <span>Что недавно попало в библиотеку</span>
+                <div class="mix-meta">смотреть</div>
+              </button>
+              <button type="button" class="mix-card tone-c" id="btn-discover-old" data-tips="old">
+                <div class="cover-blob blob-b"></div>
+                <strong>Из старого</strong>
+                <span>Забытое, но близко к вкусу</span>
+                <div class="mix-meta">смотреть</div>
+              </button>
+            </div>
+            <button type="button" class="shelf-nav next" data-for="discover-cards" aria-label="Вперёд">›</button>
+          </div>
+          <div id="tips-panel" class="tips-panel hidden"></div>
+        </section>
+      </section>
+
+      <section id="view-player" class="view">
+        <div class="now-stage">
+          <div class="now-art" id="art">
+            <div class="art-fallback" id="art-fallback">♪</div>
+            <img id="art-img" alt="" width="640" height="640" decoding="async">
+          </div>
+          <div class="now-meta">
+            <div class="now-kicker">
+              <div class="label" id="mode-label">ничего не играет</div>
+              <span id="now-source" class="tag" hidden></span>
+            </div>
+            <h2 id="title">Выбери микс</h2>
+            <p id="artist">или запусти радио на главной</p>
+            <div class="np-passport" id="now-passport" aria-label="Паспорт трека"></div>
+
+            <div class="progress-wrap">
+              <input type="range" id="seek" min="0" max="1000" value="0" step="1" aria-label="Прогресс" />
+              <div class="time-row">
+                <span id="time-cur">0:00</span>
+                <span id="time-dur">0:00</span>
+              </div>
+            </div>
+
+            <audio id="audio" preload="metadata"></audio>
+
+            <div class="transport">
+              <div class="transport-btns">
+                <button type="button" class="icon-btn" id="btn-dislike" title="Dislike">✕</button>
+                <button type="button" class="icon-btn" id="btn-back" title="Назад"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M5.6 5.2h2.2v13.6H5.6zm11.6.3v13.6L8.4 12z"/></svg></button>
+                <button type="button" class="icon-btn play-btn" id="btn-play" title="Play/Pause"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg></button>
+                <button type="button" class="icon-btn primary-icon" id="btn-skip" title="Skip">⏭</button>
+              </div>
+              <div class="volume-row">
+                <button type="button" class="icon-btn sm" id="btn-mute" title="Звук" aria-label="Звук"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.5 9.2h3.4L12.2 5v14l-4.3-4.2H4.5z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M16 9.2a4.2 4.2 0 0 1 0 5.6M18.2 7a7 7 0 0 1 0 10"/></svg></button>
+                <input class="slider" id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Громкость">
+              </div>
+            </div>
+            <div class="np-actions">
+              <button type="button" class="icon-btn" id="btn-like" title="Любимая песня" aria-label="Любимая песня">♥</button>
+              <button type="button" class="icon-btn" id="btn-np-share" title="Поделиться эфиром" aria-label="Поделиться эфиром"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3M7 8l5-5 5 5M5 13v6h14v-6"/></svg></button>
+              <button type="button" class="icon-btn" id="btn-np-more" title="Ещё" aria-label="Ещё действия" aria-expanded="false">⋯</button>
+            </div>
+            <div class="np-feedback">
+              <button type="button" class="btn" id="btn-more" title="Радио поставит больше похожего">Больше такого</button>
+              <button type="button" class="btn" id="btn-notthis" title="Не нравится — дальше">Не то</button>
+            </div>
+            <div class="fav-extra">
+              <button type="button" class="chip" id="btn-later" title="В «Потом»">в «Потом»</button>
+              <button type="button" class="chip queue-open" id="btn-queue-open" hidden>Дальше в радио</button>
+              <button type="button" class="chip" id="btn-fav-artist">♥ артист</button>
+              <button type="button" class="chip" id="btn-fav-album">♥ альбом</button>
+              <button type="button" class="chip" id="btn-similar-now">похожее</button>
+              <button type="button" class="chip" id="btn-hide-track">скрыть трек</button>
+              <button type="button" class="chip" id="btn-hide-artist">скрыть артиста</button>
+              <button type="button" class="chip" id="btn-add-pl">в плейлист</button>
+            </div>
+            <p class="hint-keys">Пробел — play/pause · B — назад · N — skip · L — любимая песня</p>
+          </div>
+        </div>
+        <aside class="np-side" aria-label="Очередь, текст и объяснения">
+        <div class="np-tabs" role="tablist">
+          <button type="button" class="np-tab active" role="tab" aria-selected="true" data-np-tab="queue">Очередь</button>
+          <button type="button" class="np-tab" role="tab" aria-selected="false" data-np-tab="lyrics">Текст</button>
+          <button type="button" class="np-tab" role="tab" aria-selected="false" data-np-tab="why">Почему</button>
+        </div>
+        <div class="np-pane np-why" data-np-pane="why" id="now-why" hidden></div>
+        <div class="np-pane" data-np-pane="lyrics" hidden>
+          <pre id="lyrics-text" class="lyrics-text">—</pre>
+        </div>
+        <div class="queue-panel np-pane" data-np-pane="queue">
+          <p class="np-queue-why" id="queue-why" hidden></p>
+          <div class="queue-head">
+            <div>
+              <div class="label" id="playlist-label">Дальше</div>
+              <p class="sub" id="queue-hint">Нажми песню — сразу она</p>
+            </div>
+            <span class="shelf-hint" id="queue-count"></span>
+          </div>
+          <ol id="playlist" class="playlist"></ol>
+          <ol id="queue" class="playlist" hidden></ol>
+        </div>
+        </aside>
+      </section>
+
+      <section id="view-library" class="view">
+        <h1 class="page-title" id="lib-title">Коллекция</h1>
+        <p class="sub" id="lib-count">—</p>
+        <div class="seg" role="tablist" aria-label="Разделы библиотеки">
+          <button type="button" class="seg-btn" data-lib="games">Игры</button>
+          <button type="button" class="seg-btn" data-lib="albums">Альбомы</button>
+          <button type="button" class="seg-btn" data-lib="artists">Артисты</button>
+          <button type="button" class="seg-btn active" data-lib="tracks">Треки</button>
+          <button type="button" class="seg-btn" data-lib="favorites">Избранное</button>
+          <button type="button" class="seg-btn seg-link" id="seg-playlists">Плейлисты</button>
+        </div>
+        <div class="lib-tools">
+          <input id="lib-filter" type="search" placeholder="Трек, альбом, игра…" autocomplete="off" aria-label="Поиск по коллекции" />
+          <select id="lib-sort" aria-label="Сортировка"></select>
+        </div>
+        <div id="lib-artist-head" class="lib-artist-head" hidden>
+          <button type="button" class="text-link" id="lib-artist-back">← все артисты</button>
+          <div class="lib-artist-title">
+            <div class="lib-artist-photo" id="lib-artist-photo" hidden></div>
+            <div>
+              <h2 id="lib-artist-name"></h2>
+              <p class="sub" id="lib-artist-meta"></p>
+            </div>
+          </div>
+          <div class="lib-artist-actions">
+            <button type="button" class="tiny" id="lib-artist-play">▶ Слушать всё</button>
+            <button type="button" class="tiny" id="lib-artist-radio">Радио</button>
+            <button type="button" class="tiny" id="lib-artist-playlist">В плейлист</button>
+          </div>
+        </div>
+        <ul id="lib-list" class="track-list"></ul>
+        <div id="lib-grid" class="lib-grid" hidden></div>
+      </section>
+
+      <section id="view-collections" class="view">
+        <h1 class="page-title">Плейлисты</h1>
+        <p class="sub">Придумай название, потом добавь песни поиском — как в обычном плеере.</p>
+
+        <div class="panel pl-create">
+          <label class="sr-only" for="pl-name">Название плейлиста</label>
+          <div class="pl-create-row">
+            <input id="pl-name" type="text" placeholder="Название, например «В дорогу»" autocomplete="off" />
+            <button type="button" class="btn primary" id="btn-pl-create">Создать</button>
+          </div>
+          <div class="pl-quick">
+            <button type="button" class="pl-quick-card" id="btn-pl-from-lib">
+              <strong>Из библиотеки</strong>
+              <span>Артисты, альбомы и треки</span>
+            </button>
+            <button type="button" class="pl-quick-card" id="btn-pl-from-fav">
+              <strong>Из любимых</strong>
+              <span>Скопировать всё с сердечком</span>
+            </button>
+            <button type="button" class="pl-quick-card" id="btn-pl-from-later">
+              <strong>Из «Потом»</strong>
+              <span>Что отложил на потом</span>
+            </button>
+            <button type="button" class="pl-quick-card" id="btn-pl-import">
+              <strong>Из файла</strong>
+              <span>M3U или список из другого плеера</span>
+            </button>
+          </div>
+          <input id="pl-import-file" type="file" accept=".m3u,.m3u8,.json,text/plain,application/json" hidden />
+        </div>
+
+        <h2 class="pl-section-title">Твои плейлисты</h2>
+        <div id="pl-list" class="pl-grid"></div>
+        <div id="pl-detail" class="panel pl-detail" hidden></div>
+      </section>
+
+      <section id="view-profile" class="view">
+        <h1 class="page-title">Профиль</h1>
+        <p class="sub">Как радио тебя знает и что ставит дальше</p>
+        <div id="profile-box" class="panel"></div>
+        <div id="monitor-box" class="panel monitor-panel"></div>
+        <div id="contexts-box" class="panel"></div>
+        <div id="rules-box" class="panel"></div>
+        <div class="panel" id="share-box">
+          <div class="panel-kicker">поделиться</div>
+          <strong>Ссылка на радио</strong>
+          <p class="sub share-description">Откроется в VLC, браузере или на телефоне. Слушатели не меняют твой вкус.</p>
+          <button type="button" class="btn" id="btn-share-radio-profile">Создать ссылку</button>
+          <ul id="share-list" class="share-list"></ul>
+        </div>
+        <button type="button" class="btn" id="btn-logout-profile" hidden>Выйти</button>
+        <div class="panel" id="ui-box">
+          <div class="panel-kicker">interface</div>
+          <strong>Интерфейс</strong>
+          <p class="sub">Оригинальный вид или Mozgolika edition: другая навигация, полка игр и экран «Сейчас играет». Выбор хранится в этом браузере.</p>
+          <label>Вид
+            <select id="ui-choice">
+              <option value="original">Оригинальный</option>
+              <option value="mozgolika">Mozgolika edition</option>
+            </select>
+          </label>
+        </div>
+        <div class="panel theme-panel" id="theme-box">
+          <div class="panel-kicker">appearance</div>
+          <strong>Theme</strong>
+          <p class="sub">A custom palette stays in this browser. Drop a finished theme in a folder next to the database: data/themes, or /data/themes in Docker. Refresh the page — no rebuild.</p>
+          <div id="theme-list" class="theme-list"></div>
+          <form id="theme-form" class="theme-form">
+            <label>Name
+              <input id="theme-name" type="text" maxlength="32" placeholder="Night" required />
+            </label>
+            <div class="theme-colors">
+              <label>Background <input id="theme-bg" type="color" value="#100c0a" /></label>
+              <label>Text <input id="theme-fg" type="color" value="#f7f0e8" /></label>
+              <label>Accent <input id="theme-accent" type="color" value="#e07a3a" /></label>
+              <label>Second <input id="theme-accent2" type="color" value="#3d8f7a" /></label>
+            </div>
+            <label>Corners <span id="theme-radius-val">18</span>
+              <input id="theme-radius" type="range" min="0" max="28" value="18" />
+            </label>
+            <label>Font
+              <select id="theme-font">
+                <option value="ember">Manrope / Syne</option>
+                <option value="grotesk">Space Grotesk</option>
+                <option value="pixel">Pixel</option>
+                <option value="system">System</option>
+              </select>
+            </label>
+            <div class="theme-form-actions">
+              <button type="button" class="btn" id="theme-preview">Preview</button>
+              <button type="submit" class="btn primary">Save theme</button>
+            </div>
+          </form>
+        </div>
+        <div id="settings-box" class="panel settings-panel"></div>
+      </section>
+
+      <section id="view-upload" class="view">
+        <h1 class="page-title">Загрузка</h1>
+        <p class="sub">Перетащи музыку, архив или папку альбома. Можно выбрать и кнопками ниже.</p>
+        <input id="upload-file" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,.zip,.tar,.tar.gz,.tgz,audio/*" hidden />
+        <input id="upload-files" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,.zip,.tar,.tar.gz,.tgz,audio/*" multiple hidden />
+        <input id="upload-folder" type="file" accept=".mp3,.flac,.m4a,.wav,.ogg,.opus,.zip,.tar,.tar.gz,.tgz,audio/*" webkitdirectory directory multiple hidden />
+        <div class="dropzone" id="upload-drop" tabindex="0">
+          <span class="upload-card-kicker">Перетащи сюда</span>
+          <strong>Брось музыку</strong>
+          <span>Треки, папка или ZIP/TAR/TAR.GZ. Структура альбома сохранится.</span>
+        </div>
+        <div class="upload-grid">
+          <button type="button" class="upload-card" id="btn-upload-file">
+            <span class="upload-card-kicker">Один трек</span>
+            <strong>Файл</strong>
+            <span>Выбрать один MP3, FLAC или другой аудиофайл</span>
+          </button>
+          <button type="button" class="upload-card" id="btn-upload-files">
+            <span class="upload-card-kicker">Несколько</span>
+            <strong>Файлы</strong>
+            <span>Загрузить сразу пачку треков без структуры папок</span>
+          </button>
+          <button type="button" class="upload-card" id="btn-upload-folder">
+            <span class="upload-card-kicker">Каталог</span>
+            <strong>Папка</strong>
+            <span>Сохранить альбом целиком, с относительными путями</span>
+          </button>
+        </div>
+        <div class="op-bar" id="op-bar" data-state="idle">
+          <div class="op-bar-head">
+            <strong id="op-title">Готово к загрузке</strong>
+            <span id="op-pct">0%</span>
+          </div>
+          <div class="op-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="op-track">
+            <div class="op-fill" id="op-fill"></div>
+          </div>
+          <p class="op-detail" id="op-detail">MP3, FLAC, M4A, WAV, OGG, Opus и архивы ZIP/TAR/TAR.GZ. В архиве: до 2000 записей и 8 ГиБ после распаковки; сам архив — до 1 ГиБ. Скрытые и посторонние файлы пропускаются.</p>
+        </div>
+        <section class="jobs-panel" aria-labelledby="jobs-title">
+          <div class="jobs-head">
+            <div>
+              <span class="upload-card-kicker">В фоне</span>
+              <h2 id="jobs-title">Что делается на сервере</h2>
+            </div>
+            <span class="jobs-badge" id="jobs-badge">—</span>
+          </div>
+          <p class="jobs-hint">Очередь хранится на сервере и продолжает работать после закрытия страницы.</p>
+          <div class="jobs-list" id="jobs-list">
+            <p class="jobs-empty">Загружаем состояние очереди…</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="mini-player" id="mini" hidden>
+      <button type="button" class="mini-main" id="mini-open">
+        <div class="mini-art" id="mini-art">
+          <img id="mini-art-img" alt="" width="96" height="96" decoding="async">
+        </div>
+        <div class="mini-text">
+          <strong id="mini-title">—</strong>
+          <span id="mini-artist">—</span>
+        </div>
+      </button>
+      <button type="button" class="icon-btn sm" id="mini-back" title="Назад"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M5.6 5.2h2.2v13.6H5.6zm11.6.3v13.6L8.4 12z"/></svg></button>
+      <button type="button" class="icon-btn sm" id="mini-play" title="Play/Pause"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8.75 5.5v13l10-6.5z"/></svg></button>
+      <button type="button" class="icon-btn sm" id="mini-skip" title="Skip"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.2 5.2h2.2v13.6h-2.2zM6.8 5.5v13.6L15.6 12z"/></svg></button>
+      <label class="mini-volume"><input class="slider" id="mini-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Громкость"></label>
+    </footer>
+
+  </div>
+
+  <div id="queue-modal" class="queue-modal" hidden>
+    <div class="queue-modal-card" role="dialog" aria-labelledby="queue-modal-title">
+      <div class="queue-modal-head">
+        <strong id="queue-modal-title">Дальше в радио</strong>
+        <button type="button" class="icon-btn sm" id="btn-queue-close" aria-label="Закрыть">✕</button>
+      </div>
+      <ol id="queue-modal-list" class="playlist"></ol>
+    </div>
+  </div>
+
+  <div id="pl-picker" class="pl-picker" hidden>
+    <div class="pl-picker-card" role="dialog" aria-labelledby="pl-picker-title">
+      <strong id="pl-picker-title">Куда добавить?</strong>
+      <p class="sub" id="pl-picker-sub">Выбери плейлист</p>
+      <div id="pl-picker-list" class="pl-picker-list"></div>
+      <button type="button" class="btn" id="btn-pl-picker-new">Новый плейлист</button>
+      <button type="button" class="btn quiet" id="btn-pl-picker-cancel">Отмена</button>
+    </div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js?v=6dae672a85"></script>
+</body>
+</html>

@@ -375,6 +375,17 @@
         <h1 class="page-title">Профиль</h1>
         <p class="sub">Как радио тебя знает и что ставит дальше</p>
         <div id="settings-box" class="panel settings-panel"></div>
+        <div class="panel" id="ui-box">
+          <div class="panel-kicker">interface</div>
+          <strong>Интерфейс</strong>
+          <p class="sub">Оригинальный вид или Mozgolika edition: другая навигация, полка игр и экран «Сейчас играет». Выбор хранится в этом браузере.</p>
+          <label>Вид
+            <select id="ui-choice">
+              <option value="original">Оригинальный</option>
+              <option value="mozgolika">Mozgolika edition</option>
+            </select>
+          </label>
+        </div>
         <div class="panel theme-panel" id="theme-box">
           <div class="panel-kicker">appearance</div>
           <strong>Theme</strong>
@@ -531,6 +542,6 @@
     </div>
   </div>
   <div id="toast" class="toast" hidden></div>
-  <script src="/app.js?v=retro26"></script>
+  <script src="/app.js?v=retro27"></script>
 </body>
 </html>

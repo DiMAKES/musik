@@ -34,12 +34,15 @@ type Config struct {
 	AuthDisabled         bool
 	SecureCookie         bool
 	PublicBaseURL        string
-	FFmpegPath           string
-	ShareBitrate         string
-	ShareMaxListeners    int
-	MobileBitrate        string // e.g. 160k — Android / LTE stream profile
-	MobileFormat         string // aac | mp3
-	CORSOrigins          []string
+	// UI is the default web interface: "original" or "mozgolika". A browser
+	// overrides it with the interface switch (musik_ui cookie).
+	UI                string
+	FFmpegPath        string
+	ShareBitrate      string
+	ShareMaxListeners int
+	MobileBitrate     string // e.g. 160k — Android / LTE stream profile
+	MobileFormat      string // aac | mp3
+	CORSOrigins       []string
 }
 
 func Load() Config {
@@ -73,6 +76,7 @@ func Load() Config {
 		AuthDisabled:         envBool("MUSIK_AUTH_DISABLED", false),
 		SecureCookie:         envBool("MUSIK_SECURE_COOKIE", false),
 		PublicBaseURL:        stringsTrimRightSlash(env("MUSIK_PUBLIC_BASE_URL", "")),
+		UI:                   env("MUSIK_UI", "original"),
 		FFmpegPath:           env("MUSIK_FFMPEG", "ffmpeg"),
 		ShareBitrate:         env("MUSIK_SHARE_BITRATE", "192k"),
 		ShareMaxListeners:    envInt("MUSIK_SHARE_MAX_LISTENERS", 4),
