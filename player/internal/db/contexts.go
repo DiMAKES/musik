@@ -9,24 +9,24 @@ import (
 )
 
 type TasteContext struct {
-	ID               string   `json:"context_id"`
-	Kind             string   `json:"kind"`
-	Name             string   `json:"name"`
-	Icon             string   `json:"icon,omitempty"`
-	Influence        float64  `json:"influence"`
-	LearningEnabled  bool     `json:"learning_enabled"`
-	Seeds            ContextSeeds `json:"seeds"`
-	CreatedAt        string   `json:"created_at"`
-	UpdatedAt        string   `json:"updated_at"`
-	ArchivedAt       string   `json:"archived_at,omitempty"`
-	PositiveSamples  int      `json:"positive_samples"`
-	HasVector        bool     `json:"has_vector"`
+	ID              string       `json:"context_id"`
+	Kind            string       `json:"kind"`
+	Name            string       `json:"name"`
+	Icon            string       `json:"icon,omitempty"`
+	Influence       float64      `json:"influence"`
+	LearningEnabled bool         `json:"learning_enabled"`
+	Seeds           ContextSeeds `json:"seeds"`
+	CreatedAt       string       `json:"created_at"`
+	UpdatedAt       string       `json:"updated_at"`
+	ArchivedAt      string       `json:"archived_at,omitempty"`
+	PositiveSamples int          `json:"positive_samples"`
+	HasVector       bool         `json:"has_vector"`
 }
 
 type ContextSeeds struct {
-	SchemaVersion int      `json:"schema_version"`
-	Tracks        []int64  `json:"tracks,omitempty"`
-	Artists       []string `json:"artists,omitempty"`
+	SchemaVersion int                `json:"schema_version"`
+	Tracks        []int64            `json:"tracks,omitempty"`
+	Artists       []string           `json:"artists,omitempty"`
 	Albums        []ContextAlbumSeed `json:"albums,omitempty"`
 }
 

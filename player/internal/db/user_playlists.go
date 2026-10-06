@@ -9,40 +9,40 @@ import (
 )
 
 type UserPlaylist struct {
-	ID              int64            `json:"id"`
-	Kind            string           `json:"kind"`
-	Type            string           `json:"type"`
-	Name            string           `json:"name"`
-	Description     string           `json:"description,omitempty"`
-	CreatedAt       string           `json:"created_at"`
-	UpdatedAt       string           `json:"updated_at,omitempty"`
-	CoverTrackID    int64            `json:"cover_track_id,omitempty"`
-	CoverArtwork    string           `json:"cover_artwork,omitempty"`
-	SortMode        string           `json:"sort_mode"`
-	ArchivedAt      string           `json:"archived_at,omitempty"`
-	RuleSchema      int              `json:"rule_schema_version,omitempty"`
-	RuleJSON        string           `json:"rule_json,omitempty"`
-	AllowDuplicates bool             `json:"allow_duplicates"`
+	ID              int64              `json:"id"`
+	Kind            string             `json:"kind"`
+	Type            string             `json:"type"`
+	Name            string             `json:"name"`
+	Description     string             `json:"description,omitempty"`
+	CreatedAt       string             `json:"created_at"`
+	UpdatedAt       string             `json:"updated_at,omitempty"`
+	CoverTrackID    int64              `json:"cover_track_id,omitempty"`
+	CoverArtwork    string             `json:"cover_artwork,omitempty"`
+	SortMode        string             `json:"sort_mode"`
+	ArchivedAt      string             `json:"archived_at,omitempty"`
+	RuleSchema      int                `json:"rule_schema_version,omitempty"`
+	RuleJSON        string             `json:"rule_json,omitempty"`
+	AllowDuplicates bool               `json:"allow_duplicates"`
 	Tracks          []UserPlaylistItem `json:"tracks,omitempty"`
-	TrackCount      int              `json:"track_count"`
+	TrackCount      int                `json:"track_count"`
 }
 
 type UserPlaylistItem struct {
-	ItemID            string  `json:"item_id"`
-	Position          int     `json:"position"`
-	TrackID           int64   `json:"track_id,omitempty"`
-	Artist            string  `json:"artist,omitempty"`
-	Title             string  `json:"title,omitempty"`
-	Album             string  `json:"album,omitempty"`
-	Duration          float64 `json:"duration,omitempty"`
-	Source            string  `json:"source"`
-	Note              string  `json:"note,omitempty"`
-	Explanation       string  `json:"explanation,omitempty"`
-	AddedAt           string  `json:"added_at,omitempty"`
-	UnresolvedArtist  string  `json:"unresolved_artist,omitempty"`
-	UnresolvedTitle   string  `json:"unresolved_title,omitempty"`
-	UnresolvedPath    string  `json:"unresolved_path,omitempty"`
-	Unresolved        bool    `json:"unresolved,omitempty"`
+	ItemID           string  `json:"item_id"`
+	Position         int     `json:"position"`
+	TrackID          int64   `json:"track_id,omitempty"`
+	Artist           string  `json:"artist,omitempty"`
+	Title            string  `json:"title,omitempty"`
+	Album            string  `json:"album,omitempty"`
+	Duration         float64 `json:"duration,omitempty"`
+	Source           string  `json:"source"`
+	Note             string  `json:"note,omitempty"`
+	Explanation      string  `json:"explanation,omitempty"`
+	AddedAt          string  `json:"added_at,omitempty"`
+	UnresolvedArtist string  `json:"unresolved_artist,omitempty"`
+	UnresolvedTitle  string  `json:"unresolved_title,omitempty"`
+	UnresolvedPath   string  `json:"unresolved_path,omitempty"`
+	Unresolved       bool    `json:"unresolved,omitempty"`
 }
 
 func validPlaylistType(v string) bool {

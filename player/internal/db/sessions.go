@@ -32,21 +32,21 @@ ORDER BY weight DESC LIMIT 50000`)
 }
 
 type PlaySessionRow struct {
-	ID              string
-	Mode            string
-	CurrentID       int64
-	QueueJSON       string
-	ExcludeJSON     string
-	RatedJSON       string
-	DailyIDsJSON    string
-	DailyPos        int
-	PlaylistName    string
-	PlaylistKind    string
-	CurrentItemJSON string
-	TasteStateJSON      string
-	ActiveContextsJSON  string
-	TransitionProfile   string
-	UpdatedAt           string
+	ID                 string
+	Mode               string
+	CurrentID          int64
+	QueueJSON          string
+	ExcludeJSON        string
+	RatedJSON          string
+	DailyIDsJSON       string
+	DailyPos           int
+	PlaylistName       string
+	PlaylistKind       string
+	CurrentItemJSON    string
+	TasteStateJSON     string
+	ActiveContextsJSON string
+	TransitionProfile  string
+	UpdatedAt          string
 }
 
 func (s *Store) UpsertPlaySession(row PlaySessionRow) error {

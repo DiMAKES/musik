@@ -410,7 +410,7 @@ CREATE TABLE tracks (
     artwork_path    TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
-);
+, album_artist TEXT, is_compilation INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE training_runs (
     run_id                 TEXT PRIMARY KEY,
     model_version          TEXT REFERENCES model_versions(model_version),
@@ -570,4 +570,4 @@ CREATE TRIGGER trg_recommendation_requests_policy_insert
 DELETE FROM "sqlite_sequence";
 COMMIT;
 PRAGMA foreign_keys = ON;
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;

@@ -638,6 +638,14 @@ def _artist_photos_and_lookups(conn: sqlite3.Connection) -> None:
     )
 
 
+def _album_artist_and_compilation(conn: sqlite3.Connection) -> None:
+    # Album-level credit and the compilation flag from the tags. Albums group
+    # by them so a compilation ("Various Artists") stays one album instead of
+    # one album per track artist. The scanner fills them on its next pass.
+    _add_column(conn, "tracks", "album_artist TEXT")
+    _add_column(conn, "tracks", "is_compilation INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS = (
     Migration(1, "baseline", _baseline),
     Migration(2, "future_data_foundation", _future_data_foundation),
@@ -648,6 +656,7 @@ MIGRATIONS = (
     Migration(7, "artist_segments", _artist_segments),
     Migration(8, "playback_state", _playback_state),
     Migration(9, "artist_photos_and_lookups", _artist_photos_and_lookups),
+    Migration(10, "album_artist_and_compilation", _album_artist_and_compilation),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

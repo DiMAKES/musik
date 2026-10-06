@@ -12,23 +12,26 @@ type Store struct {
 	DB *sql.DB
 }
 
-const SupportedSchemaVersion = 9
+const SupportedSchemaVersion = 10
 
 func mondayZeroWeekday(day time.Weekday) int {
 	return (int(day) + 6) % 7
 }
 
 type TrackRow struct {
-	ID          int64
-	Path        string
-	Title       string
-	Artist      string
+	ID     int64
+	Path   string
+	Title  string
+	Artist string
 	// ArtistSegments is the collaborator split parsed at scan time (row.artists).
 	ArtistSegments []string
-	Album       string
-	Duration    float64
-	FileMD5     string
-	CreatedAt   string
+	// AlbumArtist is the album-level credit ("Various Artists" for a flagged
+	// compilation); empty when the tags carry neither.
+	AlbumArtist  string
+	Album        string
+	Duration     float64
+	FileMD5      string
+	CreatedAt    string
 	ArtworkPath  string
 	ClusterID    int
 	Embedding    []byte
