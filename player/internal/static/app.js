@@ -48,6 +48,8 @@ function deviceId() {
 let sessionId = sessionStorage.getItem("musik_session") || null;
 let current = null;
 let playlist = [];
+let currentQueue = [];
+let queueKind = "queue"; // "queue" (radio) or "playlist" (fixed list)
 let fixedMode = false;
 let lastProgressAt = 0;
 let listenedAccum = 0;
@@ -69,6 +71,7 @@ const knownJobStatuses = new Map();
 let favoriteIds = new Set();
 let favoriteArtists = new Set();
 let favoriteAlbums = new Set(); // "artist\0album"
+const trackRatings = new Map(); // track_id -> "like" | "dislike" (this browser)
 let homeHydrated = false;
 const wiredShelves = new WeakSet();
 const shelfAnim = new WeakMap();
@@ -635,10 +638,101 @@ function setPlayIcon(playing) {
   const icon = playing ? PAUSE_ICON : PLAY_ICON;
   $("btn-play").innerHTML = icon;
   $("mini-play").innerHTML = icon;
+  if ("mediaSession" in navigator) {
+    try {
+      navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+    } catch (_) {}
+  }
+}
+
+function trackArtAbsolute(t, width = 512) {
+  const raw = t?.artwork || (t?.id ? `/api/artwork/${t.id}` : "");
+  if (!raw) return "";
+  try {
+    return new URL(thumbURL(raw, width), location.href).href;
+  } catch (_) {
+    return raw;
+  }
+}
+
+// Push the now-playing track to the OS (lock screen / notification / headset).
+function updateMediaSession(track) {
+  if (!("mediaSession" in navigator)) return;
+  try {
+    if (!track) {
+      navigator.mediaSession.metadata = null;
+      return;
+    }
+    const art = trackArtAbsolute(track, 512);
+    const meta = {
+      title: track.title || "#" + (track.id || ""),
+      artist: track.artist || "",
+      album: track.album || "",
+    };
+    if (art) meta.artwork = [{ src: art, sizes: "512x512", type: "image/jpeg" }];
+    if (typeof MediaMetadata !== "undefined") {
+      navigator.mediaSession.metadata = new MediaMetadata(meta);
+    }
+  } catch (_) {}
+}
+
+function updatePositionState() {
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+  const audio = $("audio");
+  if (!audio || !audio.duration || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: audio.duration,
+      playbackRate: audio.playbackRate || 1,
+      position: Math.max(0, Math.min(audio.currentTime, audio.duration)),
+    });
+  } catch (_) {}
+}
+
+function wireMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const ms = navigator.mediaSession;
+  const guard = (fn) => (...args) => {
+    try {
+      const r = fn(...args);
+      if (r && r.catch) r.catch(() => {});
+    } catch (_) {}
+  };
+  const set = (action, fn) => {
+    try {
+      ms.setActionHandler(action, guard(fn));
+    } catch (_) {}
+  };
+  set("play", () => {
+    if ($("audio").paused) togglePlay();
+  });
+  set("pause", () => {
+    if (!$("audio").paused) togglePlay();
+  });
+  set("previoustrack", () => backTrack());
+  set("nexttrack", () => skipTrack());
+  set("seekto", (d) => {
+    const audio = $("audio");
+    if (!d || typeof d.seekTime !== "number" || !Number.isFinite(d.seekTime)) return;
+    const t = Math.max(0, Math.min(d.seekTime, audio.duration || d.seekTime));
+    if (d.fastSeek && typeof audio.fastSeek === "function") audio.fastSeek(t);
+    else audio.currentTime = t;
+    updatePositionState();
+  });
+  set("seekbackward", (d) => {
+    const audio = $("audio");
+    audio.currentTime = Math.max(0, audio.currentTime - ((d && d.seekOffset) || 10));
+  });
+  set("seekforward", (d) => {
+    const audio = $("audio");
+    const step = (d && d.seekOffset) || 10;
+    audio.currentTime = Math.min(audio.duration || audio.currentTime + step, audio.currentTime + step);
+  });
 }
 
 function updateMini(track) {
   const mini = $("mini");
+  document.body.classList.toggle("has-mini", !!track);
   if (!track) {
     mini.hidden = true;
     return;
@@ -672,6 +766,7 @@ function applyPlayPayload(data, { autoplay = true } = {}) {
     else {
       current = data.current;
       updateMini(data.current);
+      updateMediaSession(data.current);
       $("title").textContent = data.current.title || "—";
       $("artist").textContent = [data.current.artist, data.current.album].filter(Boolean).join(" · ");
       setNowSource(data.current.source);
@@ -689,6 +784,7 @@ function renderNow(track) {
     setCoverImg($("art-img"), "", art);
     setNowSource("");
     updateMini(null);
+    updateMediaSession(null);
     setPlayIcon(false);
     return;
   }
@@ -702,6 +798,7 @@ function renderNow(track) {
     setCoverImg($("art-img"), "", art);
   }
   updateMini(track);
+  updateMediaSession(track);
   const audio = $("audio");
   const url = track.stream || `/api/stream/${track.id}`;
   if (audio.dataset.trackId !== String(track.id)) {
@@ -764,6 +861,14 @@ function queueRowHTML(t, i, { why = false, now = false } = {}) {
   const art = trackArtURL(t);
   const letter = escapeHtml((t.title || t.artist || "?").slice(0, 1).toUpperCase());
   const reason = why ? whyLabel(t) : "";
+  const numId = Number(id);
+  const rated = trackRatings.get(numId);
+  const rate = id
+    ? `<span class="row-rate">
+        <span class="rate-btn like${favoriteIds.has(numId) ? " on" : ""}" data-rate="like" role="button" tabindex="0" aria-label="Нравится" title="Нравится">♥</span>
+        <span class="rate-btn dislike${rated === "dislike" ? " on" : ""}" data-rate="dislike" role="button" tabindex="0" aria-label="Не нравится" title="Не нравится">♥</span>
+      </span>`
+    : "";
   return `
     <span class="q-art" data-letter="${letter}">${
       art ? `<img src="${escapeHtml(art)}" alt="" width="96" height="96" loading="lazy" decoding="async" onerror="this.remove()">` : ""
@@ -776,13 +881,58 @@ function queueRowHTML(t, i, { why = false, now = false } = {}) {
       </span>
     </span>
     <span class="dur">${fmtTime(t.duration || 0)}</span>
-    <span class="pos">${now ? "▶" : i + 1}</span>`;
+    <span class="pos">${now ? "▶" : i + 1}</span>
+    ${rate}`;
+}
+
+function bindRowRate(btn, trackId) {
+  btn.querySelectorAll(".rate-btn").forEach((el) => {
+    const stop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    el.addEventListener("pointerdown", stop);
+    el.addEventListener("click", (e) => {
+      stop(e);
+      rateTrack(Number(trackId), el.dataset.rate).catch(() => {});
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        stop(e);
+        rateTrack(Number(trackId), el.dataset.rate).catch(() => {});
+      }
+    });
+  });
+}
+
+async function rateTrack(trackId, type) {
+  if (!trackId) return;
+  if (type === "like") {
+    await toggleFavorite({ type: "track", track_id: trackId }, { withLike: false });
+    trackRatings.set(trackId, "like");
+  } else {
+    if (!sessionId) toast("Сначала запусти трек");
+    trackRatings.set(trackId, "dislike");
+    postEvent("dislike", { track_id: trackId }).catch(() => {});
+  }
+  refreshRatedRows(trackId);
+}
+
+function refreshRatedRows(trackId) {
+  document.querySelectorAll(`.playlist-item[data-track-id="${trackId}"]`).forEach((btn) => {
+    const rated = trackRatings.get(Number(trackId));
+    btn.querySelector(".rate-btn.like")?.classList.toggle("on", favoriteIds.has(Number(trackId)));
+    btn.querySelector(".rate-btn.dislike")?.classList.toggle("on", rated === "dislike");
+  });
 }
 
 function renderQueue(queue) {
   const ol = $("queue");
   ol.innerHTML = "";
   const list = queue || [];
+  currentQueue = list;
+  queueKind = "queue";
+  updateQueueOpenButton();
   $("playlist-label").textContent = "Дальше в радио";
   setQueueHint("Нажми песню — сразу она");
   $("queue-count").textContent = list.length ? `${list.length}` : "";
@@ -795,6 +945,7 @@ function renderQueue(queue) {
     if (id) btn.dataset.trackId = String(id);
     btn.innerHTML = queueRowHTML(q, i, { why: true });
     bindTrackButton(btn, () => jumpTo(id, i).catch((e) => toast(e.message || String(e))));
+    bindRowRate(btn, id);
     li.appendChild(btn);
     ol.appendChild(li);
   });
@@ -804,6 +955,9 @@ function renderPlaylist(tracks, currentIndex) {
   const ol = $("playlist");
   ol.innerHTML = "";
   const list = tracks || [];
+  currentQueue = list;
+  queueKind = "playlist";
+  updateQueueOpenButton();
   $("playlist-label").textContent = "В этом списке";
   setQueueHint("Нажми песню — сразу она");
   $("queue-count").textContent = list.length ? `${list.length}` : "";
@@ -818,9 +972,50 @@ function renderPlaylist(tracks, currentIndex) {
     if (now) btn.classList.add("current");
     btn.innerHTML = queueRowHTML(t, i, { now });
     bindTrackButton(btn, () => jumpTo(id, t.position ?? i).catch((e) => toast(e.message || String(e))));
+    bindRowRate(btn, id);
     li.appendChild(btn);
     ol.appendChild(li);
   });
+}
+
+function updateQueueOpenButton() {
+  const btn = $("btn-queue-open");
+  if (!btn) return;
+  btn.hidden = currentQueue.length === 0;
+  btn.textContent = queueKind === "playlist" ? "Список" : "Дальше в радио";
+}
+
+function openQueueModal() {
+  const modal = $("queue-modal");
+  const list = $("queue-modal-list");
+  if (!modal || !list) return;
+  $("queue-modal-title").textContent =
+    queueKind === "playlist" ? "В этом списке" : "Дальше в радио";
+  list.innerHTML = "";
+  currentQueue.forEach((t, i) => {
+    const id = t.track_id || t.id;
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "playlist-item";
+    if (id) btn.dataset.trackId = String(id);
+    const isNow = !!(current && id === current.id);
+    if (isNow) btn.classList.add("current");
+    btn.innerHTML = queueRowHTML(t, i, { why: queueKind === "queue", now: isNow });
+    bindTrackButton(btn, () => {
+      closeQueueModal();
+      jumpTo(id, t.position ?? i).catch((e) => toast(e.message || String(e)));
+    });
+    bindRowRate(btn, id);
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+  modal.hidden = false;
+}
+
+function closeQueueModal() {
+  const modal = $("queue-modal");
+  if (modal) modal.hidden = true;
 }
 
 function highlightPlaylist(trackId) {
@@ -1930,13 +2125,21 @@ function wireAudio() {
   });
   audio.addEventListener("loadedmetadata", () => {
     $("time-dur").textContent = fmtTime(audio.duration || 0);
+    updatePositionState();
   });
-  audio.addEventListener("play", () => setPlayIcon(true));
+  audio.addEventListener("play", () => {
+    setPlayIcon(true);
+    updatePositionState();
+  });
   audio.addEventListener("pause", () => {
     if (seeking || audio.seeking) return;
     setPlayIcon(false);
+    updatePositionState();
   });
-  audio.addEventListener("seeked", finishSeek);
+  audio.addEventListener("seeked", () => {
+    finishSeek();
+    updatePositionState();
+  });
   audio.addEventListener("ended", () => {
     const id = Number(audio.dataset.trackId || 0);
     const gen = Number(audio.dataset.gen || 0);
@@ -3377,6 +3580,7 @@ function wireTheme() {
 
 function wire() {
   wireTheme();
+  wireMediaSession();
   document.querySelectorAll(".tab").forEach((b) => {
     b.onclick = () => setView(b.dataset.view);
   });
@@ -3534,11 +3738,14 @@ function wire() {
   $("mini-volume").oninput = () => setVolume($("mini-volume").value);
   $("btn-mute").onclick = toggleMute;
   $("mini-open").onclick = () => setView("player");
-  $("btn-later").onclick = async () => {
-    if (!current?.id) return toast("Сейчас ничего не играет");
-    await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: current.id }) });
-    toast("Добавлено в «Потом»");
-  };
+  $("btn-queue-open").onclick = openQueueModal;
+  $("btn-queue-close").onclick = closeQueueModal;
+  $("queue-modal").addEventListener("click", (e) => {
+    if (e.target === $("queue-modal")) closeQueueModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeQueueModal();
+  });
   $("btn-discover-new").onclick = () => showTips("new").catch((e) => toast(e.message || String(e)));
   $("btn-discover-old").onclick = () => showTips("old").catch((e) => toast(e.message || String(e)));
   $("lib-filter").oninput = (e) => {
