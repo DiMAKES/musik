@@ -12,7 +12,7 @@ type Store struct {
 	DB *sql.DB
 }
 
-const SupportedSchemaVersion = 8
+const SupportedSchemaVersion = 9
 
 func mondayZeroWeekday(day time.Weekday) int {
 	return (int(day) + 6) % 7

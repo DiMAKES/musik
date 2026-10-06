@@ -82,13 +82,48 @@ function Invoke-Rescan {
     }
 }
 
+function Invoke-LibraryArt {
+    # Online album covers (iTunes) and artist photos (Deezer). Both commands
+    # skip what is already there and remember misses for 30 days, so an
+    # hourly run only asks about new albums and artists. Albums the running
+    # scan is still adding are picked up on the next run.
+    $musik = Join-Path $root '.venv\Scripts\musik.exe'
+    if (-not (Test-Path -LiteralPath $musik)) {
+        Write-ScanLog "art skipped: $musik not found"
+        return
+    }
+    $env:PYTHONIOENCODING = 'utf-8'
+    $env:PYTHONUTF8 = '1'
+    $ErrorActionPreference = 'Continue'
+    foreach ($cmd in @('artwork', 'artist-photos')) {
+        $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        try {
+            $out = & $musik $cmd 2>&1 | Out-String
+            $summary = ($out -split "`r?`n" | Where-Object { $_ -match '(folders|queued|found|missing|failed)\s' } |
+                ForEach-Object { ($_ -replace '[^\w\s]', ' ').Trim() -replace '\s+', '=' }) -join ' '
+            Write-ScanLog "[$stamp] $cmd exit $LASTEXITCODE $summary"
+        } catch {
+            Write-ScanLog "[$stamp] $cmd failed: $($_.Exception.Message)"
+        }
+    }
+    try {
+        $null = Invoke-WebRequest -Uri "$baseUrl/api/reload" -Method POST -Headers $headers `
+            -UseBasicParsing -TimeoutSec $TimeoutSec
+    } catch {
+        Write-ScanLog "reload after art failed: $($_.Exception.Message)"
+    }
+}
+
 if ($Once) {
-    if (Invoke-Rescan) { exit 0 }
+    $ok = Invoke-Rescan
+    Invoke-LibraryArt
+    if ($ok) { exit 0 }
     exit 1
 }
 
 Write-Host "auto-scan every $IntervalMin min via $scanUrl (Ctrl+C to stop)"
 while ($true) {
     $null = Invoke-Rescan
+    Invoke-LibraryArt
     Start-Sleep -Seconds ($IntervalMin * 60)
 }

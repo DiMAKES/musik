@@ -13,6 +13,12 @@ from musik.artwork import online, pipeline
 JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-bytes" * 10
 
 
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    # Rate-limit back-off and the storefront gap must not slow the tests down.
+    monkeypatch.setattr(online, "_sleep", lambda _s: None)
+
+
 @pytest.fixture()
 def env(tmp_path: Path, monkeypatch):
     library = tmp_path / "music"
@@ -251,3 +257,146 @@ def test_pipeline_queries_once_per_album(env, monkeypatch):
     assert (Path(cache) / "m1.jpg").read_bytes() == JPEG
     assert (Path(cache) / "m2.jpg").read_bytes() == JPEG
 
+
+def test_pipeline_limit_applies_after_missing_filter(env, monkeypatch):
+    # --limit must count tracks without covers; the first tracks by artist
+    # already have one and must not use up the limit.
+    db, library, cache = env
+    have = _track(library, "a/01.flac", artist="Aaa", album="First", md5="have")
+    need = _track(library, "b/01.flac", artist="Bbb", album="Second", md5="need")
+    Path(cache).mkdir(parents=True, exist_ok=True)
+    existing = Path(cache) / "have.jpg"
+    existing.write_bytes(JPEG)
+
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE tracks SET artwork_path = ? WHERE id = ?", (str(existing), have))
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(pipeline, "fetch_cover", lambda **kwargs: JPEG)
+    result = pipeline.fetch_library_artwork(limit=1, delay_sec=0)
+    assert (result.total, result.found) == (1, 1)
+    assert (Path(cache) / "need.jpg").read_bytes() == JPEG
+    assert need
+
+
+def _http_error(code: int, retry_after: str | None = None):
+    import email.message
+    import urllib.error
+
+    headers = email.message.Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return urllib.error.HTTPError("https://itunes", code, "throttled", headers, None)
+
+
+def test_fetch_cover_retries_after_429(monkeypatch):
+    waits: list[float] = []
+    monkeypatch.setattr(online, "_sleep", waits.append)
+    answers = [_http_error(429, "7"), {
+        "results": [{"artistName": "Nickelback", "collectionName": "Curb",
+                     "artworkUrl100": "https://img/100x100bb.jpg"}]
+    }]
+
+    def fake_get_json(url, **kwargs):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(online, "_get_json", fake_get_json)
+    monkeypatch.setattr(online, "_request", lambda url, **kwargs: (JPEG, "image/jpeg"))
+    assert online.fetch_cover(artist="Nickelback", album="Curb") == JPEG
+    assert waits == [7.0]  # honours Retry-After
+
+
+def test_pipeline_stops_when_itunes_keeps_throttling(env, monkeypatch):
+    # A persistent 429 must stop the run and count as failed, not as
+    # "cover not found" for every remaining album.
+    _db, library, _cache = env
+    _track(library, "a/01.flac", artist="Aaa", album="One", md5="a1")
+    _track(library, "b/01.flac", artist="Bbb", album="Two", md5="b1")
+    monkeypatch.setattr(online, "_sleep", lambda _s: None)
+    calls: list[str] = []
+
+    def always_429(url, **kwargs):
+        calls.append(url)
+        raise _http_error(429)
+
+    monkeypatch.setattr(online, "_get_json", always_429)
+    result = pipeline.fetch_library_artwork(delay_sec=0)
+    assert result.rate_limited
+    assert (result.total, result.found, result.missing, result.failed) == (2, 0, 0, 2)
+    assert len(calls) == online._RATE_LIMIT_RETRIES + 1  # the second album is not queried
+
+
+def test_fetch_cover_searches_ru_store_first_for_cyrillic(monkeypatch):
+    # The US store transliterates ("Splean"); the RU store keeps "Сплин".
+    monkeypatch.setattr(online, "_sleep", lambda _s: None)
+    stores: list[str] = []
+
+    def fake_get_json(url, **kwargs):
+        country = "RU" if "country=RU" in url else "US"
+        stores.append(country)
+        name = "Сплин" if country == "RU" else "Splean"
+        return {"results": [{"artistName": name, "collectionName": "Сигнал из космоса",
+                             "artworkUrl100": "https://img/100x100bb.jpg"}]}
+
+    monkeypatch.setattr(online, "_get_json", fake_get_json)
+    monkeypatch.setattr(online, "_request", lambda url, **kwargs: (JPEG, "image/jpeg"))
+    assert online.fetch_cover(artist="Сплин", album="Сигнал из космоса") == JPEG
+    assert stores == ["RU"]
+
+
+def test_fetch_cover_falls_back_to_second_store(monkeypatch):
+    monkeypatch.setattr(online, "_sleep", lambda _s: None)
+    stores: list[str] = []
+
+    def fake_get_json(url, **kwargs):
+        country = "RU" if "country=RU" in url else "US"
+        stores.append(country)
+        if country == "US":
+            return {"results": []}
+        return {"results": [{"artistName": "Nickelback", "collectionName": "Curb",
+                             "artworkUrl100": "https://img/100x100bb.jpg"}]}
+
+    monkeypatch.setattr(online, "_get_json", fake_get_json)
+    monkeypatch.setattr(online, "_request", lambda url, **kwargs: (JPEG, "image/jpeg"))
+    assert online.fetch_cover(artist="Nickelback", album="Curb") == JPEG
+    assert stores == ["US", "RU"]
+
+
+def test_pipeline_does_not_ask_again_for_recent_miss(env, monkeypatch):
+    # The hourly run must not query iTunes again for albums it could not find.
+    _db, library, _cache = env
+    _track(library, "album/01.flac", artist="Nobody", album="Nowhere", md5="n1")
+    calls: list[bool] = []
+    monkeypatch.setattr(pipeline, "fetch_cover", lambda **kwargs: calls.append(True) and None)
+
+    first = pipeline.fetch_library_artwork(delay_sec=0)
+    second = pipeline.fetch_library_artwork(delay_sec=0)
+    assert (first.total, first.missing) == (1, 1)
+    assert second.total == 0
+    assert len(calls) == 1
+    pipeline.fetch_library_artwork(delay_sec=0, force=True)
+    assert len(calls) == 2  # --force asks again
+
+
+def test_pipeline_uses_folder_cover_before_online(env, monkeypatch):
+    db, library, _cache = env
+    tid = _track(library, "album/01.flac", artist="Nickelback", album="Curb", md5="loc")
+    cover = library / "album" / "cover.jpg"
+    cover.write_bytes(JPEG)
+    monkeypatch.setattr(pipeline, "fetch_cover", lambda **kwargs: pytest.fail("must not go online"))
+
+    result = pipeline.fetch_library_artwork(delay_sec=0)
+    assert (result.local, result.total) == (1, 0)
+
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT artwork_path FROM tracks WHERE id = ?", (tid,)).fetchone()
+    conn.close()
+    assert Path(row[0]) == cover

@@ -593,6 +593,24 @@ function entityCoverHtml(cover, letter, round) {
   return `<div class="letter">${escapeHtml((letter || "♪").slice(0, 1).toUpperCase())}</div>`;
 }
 
+// Artist photos found online (musik artist-photos): normalized name -> URL.
+let artistPhotos = new Map();
+
+function artistKey(name) {
+  return String(name || "").trim().split(/\s+/).join(" ").toLowerCase();
+}
+
+function artistPhoto(name) {
+  return artistPhotos.get(artistKey(name)) || "";
+}
+
+async function loadArtistPhotos() {
+  try {
+    const data = await api("/api/artist-photos");
+    artistPhotos = new Map(Object.entries(data?.photos || {}));
+  } catch (_) {}
+}
+
 function tileArtHTML(cover, letter) {
   if (cover) {
     return `<div class="tile-art">${coverImgHTML(thumbURL(cover, 256))}</div>`;
@@ -1271,7 +1289,7 @@ function renderEntityShelf(el, items, kind) {
       const on = favoriteArtists.has(item.artist);
       btn.className = "mix-card entity-card artist-card";
       btn.innerHTML = `
-        ${entityCoverHtml(item.cover || item.artwork, item.artist, true)}
+        ${entityCoverHtml(artistPhoto(item.artist) || item.cover || item.artwork, item.artist, true)}
         <strong>${escapeHtml(item.artist)}</strong>
         <span>артист</span>
         <div class="mix-meta">${item.tracks} треков</div>`;
@@ -1552,7 +1570,7 @@ function setLibTab(tab) {
 
 async function loadLibrary() {
   library = await api("/api/library");
-  await loadFavorites();
+  await Promise.all([loadFavorites(), loadArtistPhotos()]);
   const { artists, albums } = groupCatalog(library);
   $("lib-count").textContent = `${library.length} треков · ${artists.length} артистов · ${albums.length} альбомов · ${favoriteIds.size} ♥`;
   setLibTab(libTab);
@@ -1611,7 +1629,7 @@ function renderLib(q) {
         btn.type = "button";
         btn.className = "lib-tile artist";
         btn.innerHTML = `
-          ${tileArtHTML(a.cover, a.artist)}
+          ${tileArtHTML(artistPhoto(a.artist) || a.cover, a.artist)}
           <strong>${escapeHtml(a.artist)}</strong>
           <span>${a.tracks} треков</span>
           <div class="mix-meta">
@@ -1671,6 +1689,10 @@ function renderArtistPage(qq) {
   const tracks = tracksOfArtist(libArtist);
   const albumCount = new Set(tracks.map((t) => (t.album || "").trim()).filter(Boolean)).size;
   $("lib-artist-name").textContent = libArtist;
+  const photo = artistPhoto(libArtist);
+  const photoBox = $("lib-artist-photo");
+  photoBox.hidden = !photo;
+  photoBox.innerHTML = photo ? coverImgHTML(thumbURL(photo, 256), 256, 256) : "";
   $("lib-artist-meta").textContent = `${tracks.length} треков${albumCount ? ` · ${albumCount} альбомов` : ""}`;
   grid.hidden = true;
   grid.innerHTML = "";
@@ -4082,7 +4104,7 @@ async function bootApp() {
     .then((p) => renderMaturity(p.maturity))
     .catch(console.error);
   loadMixes().catch(console.error);
-  loadHomeCatalog().catch(console.error);
+  loadArtistPhotos().finally(() => loadHomeCatalog().catch(console.error));
   restorePlayback().catch(console.error);
 }
 

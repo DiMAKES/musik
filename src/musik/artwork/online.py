@@ -18,6 +18,16 @@ USER_AGENT = "musik/0.1.0 (self-hosted)"
 # iTunes returns a 100px thumbnail; the same URL scales to 1900px.
 _THUMB = "100x100bb.jpg"
 _LARGE = "1900x1900bb.jpg"
+# iTunes allows roughly 20 searches a minute and answers 429 (sometimes 403)
+# beyond that. Back off and retry a few times before giving up the run.
+_THROTTLE_CODES = (403, 429)
+_RATE_LIMIT_RETRIES = 3
+_sleep = time.sleep  # patched in tests
+_STORE_GAP_SEC = 3.0
+
+
+class RateLimited(RuntimeError):
+    """iTunes keeps refusing requests; the batch should stop, not mark misses."""
 
 
 def _request(url: str, *, timeout: float = 30.0) -> tuple[bytes, str]:
@@ -29,6 +39,43 @@ def _request(url: str, *, timeout: float = 30.0) -> tuple[bytes, str]:
 def _get_json(url: str, *, timeout: float = 30.0) -> Any:
     raw, _ = _request(url, timeout=timeout)
     return json.loads(raw.decode("utf-8"))
+
+
+def _retry_after(err: urllib.error.HTTPError) -> float | None:
+    try:
+        value = float(err.headers.get("Retry-After") or "")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return value if value > 0 else None
+
+
+def _search(url: str, *, timeout: float) -> Any:
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        try:
+            return _get_json(url, timeout=timeout)
+        except urllib.error.HTTPError as err:
+            if err.code not in _THROTTLE_CODES:
+                raise
+            if attempt == _RATE_LIMIT_RETRIES:
+                raise RateLimited(f"iTunes HTTP {err.code} after {attempt + 1} attempts") from err
+            wait = _retry_after(err) or 30.0 * (attempt + 1)
+            logger.warning("iTunes HTTP %s, retrying in %.0fs", err.code, wait)
+            _sleep(wait)
+    raise AssertionError("unreachable")
+
+
+_CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
+
+
+def _store_order(artist: str, album: str) -> tuple[str, ...]:
+    """iTunes storefronts to search, most likely first.
+
+    The US store transliterates Russian names ("Сплин" -> "Splean"), so the
+    exact artist match fails there; the RU store keeps the original spelling.
+    """
+    if _CYRILLIC_RE.search(f"{artist} {album}"):
+        return ("RU", "US")
+    return ("US", "RU")
 
 
 def _large_artwork_url(url: str) -> str:
@@ -83,34 +130,45 @@ def _looks_like_image(raw: bytes, content_type: str) -> bool:
 
 
 def fetch_cover(*, artist: str, album: str, timeout: float = 30.0) -> bytes | None:
-    """Return cover art bytes for an album, or None when nothing matches."""
+    """Return cover art bytes for an album, or None when nothing matches.
+
+    Raises RateLimited when iTunes keeps throttling after retries.
+    """
     artist = (artist or "").strip()
     album = (album or "").strip()
     if not artist or not album:
         return None
 
-    query = urllib.parse.urlencode(
-        {"term": f"{artist} {album}", "entity": "album", "limit": 10}
-    )
-    try:
-        data = _get_json(f"{ITUNES_SEARCH}?{query}", timeout=timeout)
-    except (urllib.error.URLError, OSError, ValueError):
-        logger.exception("itunes search failed for %s — %s", artist, album)
-        return None
+    best = None
+    for attempt, country in enumerate(_store_order(artist, album)):
+        if attempt:
+            _sleep(_STORE_GAP_SEC)  # the second storefront is another request
+        query = urllib.parse.urlencode(
+            {"term": f"{artist} {album}", "entity": "album", "limit": 10, "country": country}
+        )
+        try:
+            data = _search(f"{ITUNES_SEARCH}?{query}", timeout=timeout)
+        except RateLimited:
+            raise
+        except (urllib.error.URLError, OSError, ValueError):
+            logger.exception("itunes search failed for %s — %s", artist, album)
+            return None
 
-    results = data.get("results") if isinstance(data, dict) else None
-    if not isinstance(results, list) or not results:
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            continue
+        # Require both an exact artist and an album match (an edition suffix on
+        # either side is tolerated). Never fall back to a different artist.
+        candidates = [
+            item
+            for item in results
+            if _artist_match(item, artist) and _album_match(item, album) > 0
+        ]
+        if candidates:
+            best = max(candidates, key=lambda item: _album_match(item, album))
+            break
+    if best is None:
         return None
-    # Require both an exact artist and an album match (an edition suffix on
-    # either side is tolerated). Never fall back to a different artist.
-    candidates = [
-        item
-        for item in results
-        if _artist_match(item, artist) and _album_match(item, album) > 0
-    ]
-    if not candidates:
-        return None
-    best = max(candidates, key=lambda item: _album_match(item, album))
     url = _large_artwork_url(
         (best.get("artworkUrl100") or best.get("artworkUrl60") or "").strip()
     )
@@ -126,5 +184,5 @@ def fetch_cover(*, artist: str, album: str, timeout: float = 30.0) -> bytes | No
     return raw
 
 
-def throttle(sec: float = 0.35) -> None:
+def throttle(sec: float = 3.0) -> None:
     time.sleep(sec)

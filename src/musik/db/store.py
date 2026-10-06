@@ -421,7 +421,7 @@ def list_tracks_needing_artwork(
     query never discards a row because it happens to carry a non-empty string.
     """
     sql = """
-        SELECT t.id, t.file_md5, t.artist, t.album, t.artwork_path
+        SELECT t.id, t.path, t.file_md5, t.artist, t.album, t.artwork_path
         FROM tracks t
         WHERE t.is_active = 1 AND COALESCE(t.is_duplicate_of, 0) = 0
           AND trim(COALESCE(t.artist, '')) != ''
@@ -433,6 +433,81 @@ def list_tracks_needing_artwork(
         sql += f" LIMIT {int(limit)}"
     with connect() as conn:
         return [dict(r) for r in conn.execute(sql).fetchall()]
+
+
+def recent_artwork_misses(since_iso: str) -> set[str]:
+    """Album keys looked up without a match on or after since_iso."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT album_key FROM artwork_lookups WHERE status = 'missing' AND checked_at >= ?",
+            (since_iso,),
+        ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def record_artwork_lookup(album_key: str, found: bool) -> None:
+    with connect() as conn:
+        if found:
+            conn.execute("DELETE FROM artwork_lookups WHERE album_key = ?", (album_key,))
+        else:
+            conn.execute(
+                """
+                INSERT INTO artwork_lookups(album_key, status, checked_at)
+                VALUES (?, 'missing', ?)
+                ON CONFLICT(album_key) DO UPDATE SET
+                  status = excluded.status, checked_at = excluded.checked_at
+                """,
+                (album_key, utcnow()),
+            )
+
+
+def list_library_artists() -> list[str]:
+    """Distinct artist names as the library shows them (collaborator segments)."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT artist, artist_segments FROM tracks
+            WHERE is_active = 1 AND COALESCE(is_duplicate_of, 0) = 0
+            """
+        ).fetchall()
+    seen: dict[str, str] = {}
+    for artist, segments_json in rows:
+        try:
+            segments = json.loads(segments_json) if segments_json else []
+        except ValueError:
+            segments = []
+        names = [str(s) for s in segments if str(s).strip()] or [str(artist or "")]
+        for name in names:
+            name = " ".join(name.split())
+            if name:
+                seen.setdefault(name.lower(), name)
+    return sorted(seen.values(), key=str.lower)
+
+
+def artist_photo_states() -> dict[str, dict[str, Any]]:
+    """name_key -> {status, path, checked_at} for every stored lookup."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT name_key, status, path, checked_at FROM artist_photos"
+        ).fetchall()
+    return {
+        str(r[0]): {"status": r[1], "path": r[2], "checked_at": r[3]} for r in rows
+    }
+
+
+def save_artist_photo(name_key: str, artist: str, path: str | None, source: str) -> None:
+    status = "found" if path else "missing"
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO artist_photos(name_key, artist, path, status, source, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name_key) DO UPDATE SET
+              artist = excluded.artist, path = excluded.path, status = excluded.status,
+              source = excluded.source, checked_at = excluded.checked_at
+            """,
+            (name_key, artist, path, status, source, utcnow()),
+        )
 
 
 def save_artwork_path(track_id: int, path: str) -> None:

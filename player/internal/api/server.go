@@ -76,6 +76,8 @@ var apiRoutes = []routeDescriptor{
 	{"POST", "/api/events", (*Server).handleEvents},
 	{"GET", "/api/now", (*Server).handleNow},
 	{"GET", "/api/playback/state", (*Server).handlePlaybackStateGet},
+	{"GET", "/api/artist-photos", (*Server).handleArtistPhotos},
+	{"GET", "/api/artist-photos/{id}", (*Server).handleArtistPhoto},
 	{"PUT", "/api/playback/state", (*Server).handlePlaybackStatePut},
 	{"GET", "/api/tracks/{id}/lyrics", (*Server).handleTrackLyrics},
 	{"GET", "/api/mixes", (*Server).handleMixes},

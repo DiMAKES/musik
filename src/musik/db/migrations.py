@@ -609,6 +609,35 @@ def _playback_state(conn: sqlite3.Connection) -> None:
     )
 
 
+def _artist_photos_and_lookups(conn: sqlite3.Connection) -> None:
+    # Artist photos fetched online (Deezer), keyed by the normalized artist
+    # name ("сплин"). status='missing' remembers a lookup without a match so
+    # the hourly run does not ask again every time.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS artist_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name_key TEXT NOT NULL UNIQUE,
+            artist TEXT NOT NULL,
+            path TEXT,
+            status TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            checked_at TEXT NOT NULL
+        )
+        """
+    )
+    # Album cover lookups without a match, for the same reason.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS artwork_lookups (
+            album_key TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 MIGRATIONS = (
     Migration(1, "baseline", _baseline),
     Migration(2, "future_data_foundation", _future_data_foundation),
@@ -618,6 +647,7 @@ MIGRATIONS = (
     Migration(6, "remaster_marker", _remaster_marker),
     Migration(7, "artist_segments", _artist_segments),
     Migration(8, "playback_state", _playback_state),
+    Migration(9, "artist_photos_and_lookups", _artist_photos_and_lookups),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

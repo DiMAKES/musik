@@ -105,6 +105,13 @@ CREATE TABLE play_sessions (
  taste_state_schema_version INTEGER, taste_state_json TEXT,
  active_contexts_json TEXT, transition_profile TEXT NOT NULL DEFAULT 'smooth'
 );
+CREATE TABLE artist_photos (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, name_key TEXT NOT NULL UNIQUE, artist TEXT NOT NULL,
+ path TEXT, status TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL
+);
+CREATE TABLE artwork_lookups (
+ album_key TEXT PRIMARY KEY, status TEXT NOT NULL, checked_at TEXT NOT NULL
+);
 CREATE TABLE playback_state (
  owner_scope TEXT PRIMARY KEY DEFAULT 'local', session_id TEXT NOT NULL DEFAULT '',
  track_id INTEGER NOT NULL DEFAULT 0, position_sec REAL NOT NULL DEFAULT 0,
@@ -209,7 +216,7 @@ CREATE TABLE radio_prefs (
  explore_lo REAL NOT NULL DEFAULT 0.10, explore_hi REAL NOT NULL DEFAULT 0.40,
  updated_at TEXT NOT NULL
 );
- PRAGMA user_version = 8;
+ PRAGMA user_version = 9;
 `
 
 func Create(path string) error {
