@@ -101,7 +101,7 @@ Content-Type: `application/json` (кроме stream/artwork и `POST /api/librar
 | GET | `/api/jobs` | `?status=` список |
 | GET | `/api/jobs/{id}` | статус |
 | POST | `/api/jobs/{kind}` | scan\|embed\|clusters\|daily\|album_tips\|full_rescan\|mix_pack; ответ содержит одинаковые aliases `id` и `job_id` |
-| POST | `/api/library/upload` | multipart: `file` + `path` (относительный путь внутри библиотеки) |
+| POST | `/api/library/upload` | multipart: `file` + `path` (относительный путь внутри библиотеки). ZIP/TAR/TAR.GZ распаковываются во временный скрытый каталог и публикуются целиком только после проверки: только обычные аудиофайлы, без ссылок и выхода за корень, до 2000 записей и 8 ГиБ после распаковки |
 | POST | `/api/library/rescan` | enqueue full_rescan; ответ содержит одинаковые aliases `id` и `job_id` |
 | GET | `/api/discover/albums` | new album tips |
 | GET | `/api/discover/resurfaced` | старый каталог |

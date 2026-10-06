@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,13 @@ type mobileFlight struct {
 	mu   sync.Mutex
 	wait map[int64]*flightEntry
 }
+
+// Every media.Service shares one cache directory, so de-duplication and the
+// ffmpeg budget are process-wide.
+var (
+	sharedMobileFlight mobileFlight
+	transcodeSlots     = make(chan struct{}, max(2, runtime.NumCPU()/2))
+)
 
 func (f *mobileFlight) do(id int64, fn func() error) error {
 	f.mu.Lock()
@@ -84,7 +92,7 @@ func mobileContentType(format string) string {
 // Tiny already-lossy files need no re-encode.
 func skipMobileTranscode(srcPath string) bool {
 	switch strings.ToLower(filepath.Ext(srcPath)) {
-	case ".mp3", ".m4a", ".aac", ".opus", ".ogg":
+	case ".mp3", ".m4a", ".aac":
 		st, err := os.Stat(srcPath)
 		if err != nil {
 			return false
@@ -117,17 +125,6 @@ func (s *Service) lookupMobileCache(id int64, srcPath string) (path, ctype strin
 	return "", "", false
 }
 
-func (s *Service) scheduleMobileTranscode(id int64, srcPath string) {
-	go func() {
-		path, ctype, err := s.ensureMobileFile(id, srcPath)
-		if err != nil {
-			log.Printf("mobile transcode %d: %v", id, err)
-			return
-		}
-		s.loadWarmFromFile(id, path, ctype)
-	}()
-}
-
 func (s *Service) ensureMobileFile(id int64, srcPath string) (path, ctype string, err error) {
 	if path, ctype, ok := s.lookupMobileCache(id, srcPath); ok {
 		return path, ctype, nil
@@ -141,7 +138,7 @@ func (s *Service) ensureMobileFile(id int64, srcPath string) (path, ctype string
 		return "", "", err
 	}
 
-	ferr := s.mobileFlight.do(id, func() error {
+	ferr := sharedMobileFlight.do(id, func() error {
 		if dstInfo, err := os.Stat(dst); err == nil && !dstInfo.ModTime().Before(srcInfo.ModTime()) && dstInfo.Size() > 0 {
 			return nil
 		}
@@ -154,7 +151,7 @@ func (s *Service) ensureMobileFile(id int64, srcPath string) (path, ctype string
 			if dstInfo, err := os.Stat(mp3Path); err == nil && !dstInfo.ModTime().Before(srcInfo.ModTime()) && dstInfo.Size() > 0 {
 				return mp3Path, mp3Type, nil
 			}
-			if err := s.mobileFlight.do(-id, func() error {
+			if err := sharedMobileFlight.do(-id, func() error {
 				return s.transcodeMobile(srcPath, mp3Path, "mp3")
 			}); err != nil {
 				return "", "", ferr
@@ -174,8 +171,14 @@ func (s *Service) transcodeMobile(src, dst, format string) error {
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	tmp := dst + ".tmp"
-	_ = os.Remove(tmp)
+	transcodeSlots <- struct{}{}
+	defer func() { <-transcodeSlots }()
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := tmpFile.Name()
+	_ = tmpFile.Close()
 
 	bitrate := s.mobileBitrate()
 	var args []string
@@ -218,12 +221,20 @@ func (s *Service) transcodeMobile(src, dst, format string) error {
 	return nil
 }
 
+// streamWarm keeps prepared mobile audio for the current and next tracks in
+// memory. One cache serves the whole process and is bounded by total size,
+// not by entry count, so memory stays predictable for long tracks.
 type streamWarm struct {
-	mu    sync.Mutex
-	max   int
-	order []int64
-	data  map[int64]warmEntry
+	mu       sync.Mutex
+	maxBytes int
+	bytes    int
+	order    []int64
+	data     map[int64]warmEntry
 }
+
+const warmCacheBytes = 64 << 20
+
+var sharedWarm = newStreamWarm(warmCacheBytes)
 
 type warmEntry struct {
 	bytes []byte
@@ -231,11 +242,8 @@ type warmEntry struct {
 	mtime time.Time
 }
 
-func newStreamWarm(max int) *streamWarm {
-	if max < 4 {
-		max = 8
-	}
-	return &streamWarm{max: max, data: map[int64]warmEntry{}}
+func newStreamWarm(maxBytes int) *streamWarm {
+	return &streamWarm{maxBytes: maxBytes, data: map[int64]warmEntry{}}
 }
 
 func (cache *streamWarm) get(id int64) (warmEntry, bool) {
@@ -256,9 +264,13 @@ func (cache *streamWarm) get(id int64) (warmEntry, bool) {
 }
 
 func (cache *streamWarm) put(id int64, entry warmEntry) {
+	if len(entry.bytes) > cache.maxBytes {
+		return
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if _, ok := cache.data[id]; ok {
+	if old, ok := cache.data[id]; ok {
+		cache.bytes -= len(old.bytes)
 		for i, itemID := range cache.order {
 			if itemID == id {
 				cache.order = append(cache.order[:i], cache.order[i+1:]...)
@@ -267,10 +279,12 @@ func (cache *streamWarm) put(id int64, entry warmEntry) {
 		}
 	}
 	cache.data[id] = entry
+	cache.bytes += len(entry.bytes)
 	cache.order = append(cache.order, id)
-	for len(cache.order) > cache.max {
+	for cache.bytes > cache.maxBytes && len(cache.order) > 1 {
 		oldest := cache.order[0]
 		cache.order = cache.order[1:]
+		cache.bytes -= len(cache.data[oldest].bytes)
 		delete(cache.data, oldest)
 	}
 }
@@ -379,29 +393,25 @@ func (s *Service) serveMobileCached(w http.ResponseWriter, r *http.Request, id i
 	return false
 }
 
-// ServeMobile serves the stable mobile or original variant with Range support.
+// ServeMobile prepares one compatible representation before serving any bytes.
+// Android players commonly start with Range; that must not select the original
+// FLAC/Opus file or change the representation between successive range requests.
 func (s *Service) ServeMobile(w http.ResponseWriter, r *http.Request, id int64, srcPath string) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 
-	if r.Header.Get("Range") != "" {
-		if variant, ok := s.mobileVariant.Load(id); ok {
-			if variant.(string) == "mobile" && s.serveMobileCached(w, r, id, srcPath) {
-				return
-			}
-			serveFile(w, r, srcPath, contentType(srcPath))
-			return
-		}
-		s.mobileVariant.Store(id, "original")
-		serveFile(w, r, srcPath, contentType(srcPath))
-		return
-	}
-
 	if s.serveMobileCached(w, r, id, srcPath) {
-		s.mobileVariant.Store(id, "mobile")
 		return
 	}
-	s.mobileVariant.Store(id, "original")
-	s.scheduleMobileTranscode(id, srcPath)
-	serveFile(w, r, srcPath, contentType(srcPath))
+	path, ctype, err := s.ensureMobileFile(id, srcPath)
+	if err != nil {
+		log.Printf("mobile transcode %d: %v", id, err)
+		if os.IsNotExist(err) {
+			http.Error(w, "file missing", http.StatusNotFound)
+		} else {
+			http.Error(w, "mobile audio preparation failed", http.StatusBadGateway)
+		}
+		return
+	}
+	serveFile(w, r, path, ctype)
 }
