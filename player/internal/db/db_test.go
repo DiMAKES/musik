@@ -70,7 +70,7 @@ func TestLatestPlaylistSelectsNewestAndPreservesPositions(t *testing.T) {
 	store, _ := openTestStore(t)
 	for id := int64(1); id <= 3; id++ {
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title, artist, duration) VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO tracks(id, path, title, artist, duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 			id, fmt.Sprintf("/track-%d.flac", id), fmt.Sprintf("Track %d", id), "Artist", 180,
 		); err != nil {
 			t.Fatal(err)
@@ -108,7 +108,7 @@ func TestLatestPlaylistSelectsNewestAndPreservesPositions(t *testing.T) {
 
 func TestConcurrentWorkerAndEventWrites(t *testing.T) {
 	store, path := openTestStore(t)
-	if _, err := store.DB.Exec(`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`); err != nil {
+	if _, err := store.DB.Exec(`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	jobID, err := store.EnqueueJob("mix_pack", `{}`)
@@ -179,7 +179,7 @@ func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
 	store, _ := openTestStore(t)
 	for id := int64(1); id <= 2; id++ {
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title) VALUES (?, ?, ?)`,
+			`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 			id, fmt.Sprintf("/track-%d.flac", id), fmt.Sprintf("Track %d", id),
 		); err != nil {
 			t.Fatal(err)
@@ -236,7 +236,7 @@ func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
 func TestLifecycleEventsAreIdempotent(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestLifecycleEventsAreIdempotent(t *testing.T) {
 func TestLegacyFallbackRejectsAmbiguousPendingImpressions(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestLegacyFallbackRejectsAmbiguousPendingImpressions(t *testing.T) {
 func TestBaselineStatusAndMetricBreakdowns(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title, artist) VALUES (1, '/track.flac', 'Track', 'Artist')`,
+		`INSERT INTO tracks(id, path, title, artist, created_at, updated_at) VALUES (1, '/track.flac', 'Track', 'Artist', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ INSERT INTO recommendation_impressions(
 func TestMetricsExcludeLegacyManualAndShare(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title, artist) VALUES (1, '/track.flac', 'Track', 'Artist')`,
+		`INSERT INTO tracks(id, path, title, artist, created_at, updated_at) VALUES (1, '/track.flac', 'Track', 'Artist', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ INSERT INTO recommendation_impressions(
 func TestLikeStatsAreIdempotentWithoutSameEventID(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestLikeStatsAreIdempotentWithoutSameEventID(t *testing.T) {
 func TestLatestPoliciesAndTrainingRuns(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -475,13 +475,16 @@ func TestLatestPoliciesAndTrainingRuns(t *testing.T) {
 	}}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB.Exec(`INSERT INTO model_versions(model_version,model_type,feature_schema_version,artifact_path,artifact_hash,status,created_at) VALUES ('ranker-v2','ranker',1,'/test/ranker.json','hash','active',datetime('now'))`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.DB.Exec(`
 INSERT INTO training_runs(
   run_id, model_version, model_type, feature_schema_version, train_from, train_until,
   positive_count, negative_count, metrics_schema_version, metrics_json, status, created_at
 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
 		NewID(), "ranker-v2", "linear", 1, "2026-01-01", "2026-02-01",
-		12, 8, 1, `{"auc":0.71}`, "published",
+		12, 8, 1, `{"auc":0.71}`, "completed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +496,7 @@ INSERT INTO training_runs(
 		t.Fatalf("policy=%+v", policies[0])
 	}
 	runs, err := store.ListTrainingRuns(3)
-	if err != nil || len(runs) != 1 || runs[0].Status != "published" {
+	if err != nil || len(runs) != 1 || runs[0].Status != "completed" {
 		t.Fatalf("runs=%v err=%v", runs, err)
 	}
 	if runs[0].Metrics["auc"] != 0.71 {

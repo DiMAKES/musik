@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -9,8 +10,8 @@ func insertTracks(t *testing.T, store *Store, n int) {
 	t.Helper()
 	for id := 1; id <= n; id++ {
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title, artist, album, year, duration) VALUES (?,?,?,?,?,?,?)`,
-			id, "/t.flac", "Title", "Artist", "Album", 2012, 180,
+			`INSERT INTO tracks(id, path, title, artist, album, year, duration, created_at, updated_at) VALUES (?,?,?,?,?,?,?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			id, fmt.Sprintf("/t-%d.flac", id), "Title", "Artist", "Album", 2012, 180,
 		); err != nil {
 			t.Fatal(err)
 		}

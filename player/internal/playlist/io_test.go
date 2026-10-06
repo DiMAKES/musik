@@ -1,6 +1,7 @@
 package playlist
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -20,8 +21,8 @@ func TestSmartPlaylistRoundTripAndImportExport(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	for id := 1; id <= 3; id++ {
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title, artist, album, year, duration) VALUES (?,?,?,?,?,?,?)`,
-			id, "/t.flac", "Title", "Artist", "Album", 2012, 180,
+			`INSERT INTO tracks(id, path, title, artist, album, year, duration, created_at, updated_at) VALUES (?,?,?,?,?,?,?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			id, fmt.Sprintf("/t-%d.flac", id), "Title", "Artist", "Album", 2012, 180,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +61,7 @@ func TestSmartPlaylistRoundTripAndImportExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exported) == 0 || containsPath(string(exported), "/t.flac") {
+	if len(exported) == 0 || containsPath(string(exported), "/t-1.flac") {
 		t.Fatalf("export leaked a server path: %s", exported)
 	}
 	doc, err := ParseImport("copy", string(exported), "application/json")

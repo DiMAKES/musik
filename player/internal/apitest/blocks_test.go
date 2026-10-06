@@ -23,7 +23,7 @@ func TestBlockArtistLeavesGeneratedMusic(t *testing.T) {
 	for _, row := range rows {
 		path := filepath.Join(t.TempDir(), row.Title+".flac")
 		if _, err := server.Store.DB.Exec(
-			`INSERT INTO tracks(id, path, title, artist, album, duration) VALUES (?,?,?,?,?,?)
+			`INSERT INTO tracks(id, path, title, artist, album, duration, created_at, updated_at) VALUES (?,?,?,?,?,?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
 			 ON CONFLICT(id) DO UPDATE SET path=excluded.path, title=excluded.title, artist=excluded.artist, album=excluded.album`,
 			row.ID, path, row.Title, row.Artist, row.Album, row.Duration,
 		); err != nil {

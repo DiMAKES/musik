@@ -2,6 +2,7 @@ package apitest
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -39,13 +40,13 @@ func openTestServer(t *testing.T) *api.Server {
 	rows := make([]db.TrackRow, 0, 3)
 	for _, id := range []int64{11, 22, 33} {
 		rows = append(rows, db.TrackRow{
-			ID: id, Path: filepath.Join(dir, "missing.flac"),
+			ID: id, Path: filepath.Join(dir, fmt.Sprintf("missing-%d.flac", id)),
 			Title: "Track", Artist: "Artist", Album: "Album", Duration: 180,
 			Embedding: index.Float32Bytes([]float32{1, float32(id)}), Dim: 2,
 		})
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title, artist, album, duration) VALUES (?,?,?,?,?,?)`,
-			id, filepath.Join(dir, "missing.flac"), "Track", "Artist", "Album", 180,
+			`INSERT INTO tracks(id, path, title, artist, album, duration, created_at, updated_at) VALUES (?,?,?,?,?,?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			id, filepath.Join(dir, fmt.Sprintf("missing-%d.flac", id)), "Track", "Artist", "Album", 180,
 		); err != nil {
 			t.Fatal(err)
 		}
