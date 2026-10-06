@@ -15,11 +15,13 @@
 .EXAMPLE
   .\scripts\start-musik.ps1               # start worker + player
   .\scripts\start-musik.ps1 -Stop         # stop both
+  .\scripts\start-musik.ps1 -Restart      # stop both, start with the current .env
   .\scripts\start-musik.ps1 -InstallStartup   # register logon autostart
 #>
 [CmdletBinding()]
 param(
     [switch]$Stop,
+    [switch]$Restart,
     [switch]$InstallStartup,
     [switch]$UninstallStartup,
     [switch]$WorkerOnly,
@@ -117,6 +119,21 @@ if ($Stop) {
     Stop-TrackedProcess -PidFile $playerPidFile -MustContain 'musik-player' -Label 'player'
     Stop-TrackedProcess -PidFile $workerPidFile -MustContain 'worker' -Label 'worker'
     return
+}
+
+if ($Restart) {
+    # Used by Profile -> Settings -> Restart: the player launches this script
+    # without its MUSIK_* variables, so the values above come from .env.
+    Stop-TrackedProcess -PidFile $playerPidFile -MustContain 'musik-player' -Label 'player'
+    Stop-TrackedProcess -PidFile $workerPidFile -MustContain 'worker' -Label 'worker'
+    # A player started some other way (by hand, older launcher) keeps the port.
+    $playerExePath = Join-Path $root 'player\bin\musik-player.exe'
+    Get-Process musik-player -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $playerExePath } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 20 -and ((Test-MusikPort -Url $healthUrl) -or (Test-MusikPort -Url $workerUrl)); $i++) {
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null

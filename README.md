@@ -199,7 +199,10 @@ musik/
 | `sim_listener.py` | детерминированные listener-сценарии (`make sim`) |
 | `export_paper_cosine.py` | утилита для cosine-таблиц / экспериментов |
 | `musik-env.ps1` | Windows: чтение `.env`, health-проверки player/worker |
-| `start-musik.ps1` | Windows: запуск worker+player с `.env`, PID/логи, `-InstallStartup` (автозапуск при входе) |
+| `setup-windows.ps1` | Windows: установка одной командой (клон, зависимости, `.env`, сборка, запуск, автозапуск) |
+| `setup-linux.sh` | Linux: то же самое + systemd user-сервисы |
+| `musik.sh` | Linux: `start\|stop\|restart\|status\|logs` (через systemd, если сервисы установлены) |
+| `start-musik.ps1` | Windows: запуск worker+player с `.env`, PID/логи, `-Restart`, `-InstallStartup` (автозапуск при входе) |
 | `auto-scan.ps1` | Windows: плановый перескан библиотеки (`-InstallTask`, по умолчанию каждые 60 мин) |
 
 ### `tools/`
@@ -216,6 +219,36 @@ musik/
 ---
 
 ## Быстрый старт
+
+### Одной командой на своём ПК (Windows / Linux)
+
+Скрипт сам скачает репозиторий, поставит недостающее (Git, Python 3.11+, Go,
+ffmpeg — с вопросом перед установкой), создаст `.venv`, спросит папку с музыкой,
+доступ с телефона и пароль, соберёт и запустит сервер, предложит автозапуск
+и ежечасный перескан. Повторный запуск обновляет код и перезапускает сервер,
+существующий `.env` не трогает.
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/torwin-job/musik/main/scripts/setup-windows.ps1 -OutFile $env:TEMP\musik-setup.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\musik-setup.ps1
+```
+
+Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/torwin-job/musik/main/scripts/setup-linux.sh | bash
+```
+
+Без вопросов: `... -File $env:TEMP\musik-setup.ps1 -Dir D:\musik -Music D:\Music -Yes`
+или `curl ... | bash -s -- --dir ~/musik --music ~/Music --yes`.
+На Linux автозапуск — systemd user-сервисы (`musik-worker`, `musik-player`,
+таймер `musik-scan`); без них — `scripts/musik.sh start|stop|restart|status|logs`.
+
+Адрес сервера (только этот ПК / домашняя сеть / интернет), порт, папку с
+музыкой и данные для подключения телефона (адреса, API-токен) потом можно
+менять в веб-интерфейсе: **Профиль → Настройки**. Значения пишутся в `.env`,
+кнопка «Перезапустить сервер» применяет их.
 
 ### Docker (рекомендуется на сервере)
 

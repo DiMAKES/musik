@@ -226,6 +226,7 @@ function setView(name) {
   if (name === "library") loadLibrary().catch(console.error);
   if (name === "collections") loadPlaylists().catch(console.error);
   if (name === "profile") {
+    loadSettings().catch(console.error);
     loadInstalledThemes();
     loadProfile().catch(console.error);
     loadShares().catch(console.error);
@@ -1827,6 +1828,448 @@ function pct(value) {
   return `${Math.round((Number(value) || 0) * 100)}%`;
 }
 
+// ---- Profile → Settings: listen address, music folder, phone connection ----
+// Values are saved to .env on the server and take effect after a restart; the
+// panel shows what is saved and offers the restart.
+let settingsData = null;
+let settingsDirPath = "";
+let settingsExternalIp = "";
+
+function escapeAttr(s) {
+  return escapeHtml(s).replace(/"/g, "&quot;");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    // http on a LAN address is not a secure context: no clipboard API there.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (_) {}
+    ta.remove();
+  }
+  toast("Скопировано");
+}
+
+function splitListenAddr(addr) {
+  const m = String(addr || "").match(/^(.*):(\d+)$/);
+  const host = m ? m[1] : "";
+  const port = m ? Number(m[2]) : 8787;
+  if (!host || host === "0.0.0.0" || host === "::") return { mode: "lan", host: "", port };
+  if (host === "127.0.0.1" || host === "localhost") return { mode: "local", host, port };
+  return { mode: "ip", host, port };
+}
+
+async function loadSettings() {
+  const box = $("settings-box");
+  if (!box) return;
+  try {
+    settingsData = await api("/api/settings");
+  } catch (e) {
+    box.innerHTML = `
+      <div class="panel-kicker">сервер</div>
+      <strong>Настройки</strong>
+      <p class="sub">${escapeHtml(e.message || String(e))}</p>`;
+    return;
+  }
+  renderSettings();
+}
+
+function renderSettings() {
+  const box = $("settings-box");
+  const s = settingsData;
+  const saved = splitListenAddr(s.saved.addr);
+  const ips = s.local_ips || [];
+  const phone = s.phone || {};
+  box.innerHTML = `
+    <div class="panel-kicker">сервер</div>
+    <strong>Настройки</strong>
+    <div class="settings-banner" id="settings-pending" ${s.restart_pending ? "" : "hidden"}>
+      <span>Изменения сохранены и заработают после перезапуска сервера.</span>
+      <button type="button" class="btn primary" id="settings-restart">Перезапустить сервер</button>
+    </div>
+
+    <div class="settings-section">
+      <h3>Адрес сервера</h3>
+      <label class="settings-radio"><input type="radio" name="listen" value="lan"> Вся домашняя сеть — открывается с телефона по Wi-Fi</label>
+      <label class="settings-radio"><input type="radio" name="listen" value="internet"> Интернет — откуда угодно (мобильный интернет, другой город)</label>
+      <label class="settings-radio"><input type="radio" name="listen" value="local"> Только этот компьютер</label>
+      <label class="settings-radio" ${ips.length ? "" : "hidden"}><input type="radio" name="listen" value="ip"> Только адрес
+        <select id="settings-ip">${ips.map((ip) => `<option>${escapeHtml(ip)}</option>`).join("")}</select></label>
+      <div class="form-row">
+        <label class="settings-field">Порт <input id="settings-port" type="number" min="1" max="65535"></label>
+      </div>
+      <label class="settings-field settings-wide"><span id="settings-public-label">Адрес для телефона и ссылок «Поделиться»</span>
+        <input id="settings-public" type="text" placeholder="http://192.168.1.5:8787" autocomplete="off">
+      </label>
+      <div class="settings-suggest" id="settings-public-suggest"></div>
+      <div class="settings-internet" id="settings-internet" hidden>
+        <p>Сервер будет слушать все сети, но из интернета его откроет не он, а один из вариантов:</p>
+        <ul>
+          <li><b>Tailscale</b> (проще и безопаснее всего): поставь его на компьютер и телефон, войди в один аккаунт. Порт открывать не нужно, адрес — <code>http://&lt;Tailscale-IP компьютера&gt;:${saved.port}</code>.</li>
+          <li><b>Cloudflare Tunnel</b>: даёт домен с HTTPS даже без белого IP. Адрес — <code>https://твой-домен</code>.</li>
+          <li><b>Белый IP</b>: на роутере пробрось TCP-порт ${saved.port} на этот компьютер. Адрес — <code>http://&lt;внешний IP&gt;:${saved.port}</code>; лучше поставить перед сервером Caddy с HTTPS.</li>
+        </ul>
+        <p>${s.phone?.auth_enabled ? "Пароль включён — без него в интернет выходить нельзя." : "<b>Сейчас сервер без пароля — в интернет так выходить нельзя.</b> Задай MUSIK_PASSWORD в .env."}
+          Работаешь по HTTPS — добавь в .env <code>MUSIK_SECURE_COOKIE=1</code>.</p>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Папка с музыкой</h3>
+      <div class="form-row settings-folder-row">
+        <input id="settings-library" type="text" autocomplete="off">
+        <button type="button" class="btn" id="settings-browse">Выбрать…</button>
+      </div>
+      <div class="settings-browser" id="settings-browser" hidden></div>
+      <p class="sub">После смены папки нужно пересканирование: треки из старой папки пропадут из библиотеки, история прослушиваний останется.</p>
+    </div>
+
+    <div class="form-row">
+      <button type="button" class="btn primary" id="settings-save">Сохранить</button>
+      <span class="sub" id="settings-hint">${escapeHtml(s.env_path || "")}</span>
+    </div>
+
+    <div class="settings-section">
+      <h3>Подключение телефона</h3>
+      ${
+        (phone.urls || []).length
+          ? `<p class="sub">Адрес сервера для приложения или браузера на телефоне:</p>
+             <ul class="settings-list">${phone.urls
+               .map(
+                 (u) => `<li><code>${escapeHtml(u)}</code>
+                   <button type="button" class="tiny" data-copy="${escapeAttr(u)}">копировать</button></li>`
+               )
+               .join("")}</ul>`
+          : `<p class="sub">Сейчас сервер открыт только на этом компьютере — выбери «Вся домашняя сеть» выше и перезапусти.</p>`
+      }
+      ${
+        phone.auth_enabled && phone.token
+          ? `<p class="sub">API-токен (вход в приложении, заголовок <code>Authorization: Bearer …</code>):</p>
+             <div class="settings-token">
+               <code id="settings-token">••••••••••••••••</code>
+               <button type="button" class="tiny" id="settings-token-show">показать</button>
+               <button type="button" class="tiny" id="settings-token-copy">копировать</button>
+             </div>`
+          : phone.auth_enabled
+            ? `<p class="sub">API-токен не задан — в приложении входи по паролю.</p>`
+            : `<p class="sub">Сервер работает без пароля: токен не нужен.</p>`
+      }
+      <div class="settings-qr">
+        <h3>QR-код для приложения</h3>
+        <div class="form-row">
+          <select id="settings-qr-url"></select>
+          <button type="button" class="btn" id="settings-qr-show">Показать QR</button>
+        </div>
+        <p class="sub" id="settings-qr-note"></p>
+        <div class="settings-qr-box" id="settings-qr-box" hidden>
+          <img id="settings-qr-img" alt="QR-код для подключения" width="240" height="240">
+          <p class="sub">Открой приложение musik (iPhone) или Sirin Music (Android) → «Сканировать QR».
+            В коде есть токен доступа — не показывай его посторонним.</p>
+        </div>
+      </div>
+      <div class="settings-token settings-external">
+        <span class="sub">Внешний IP (так компьютер виден из интернета):</span>
+        <code id="settings-external-ip">…</code>
+        <button type="button" class="tiny" id="settings-external-copy" hidden>копировать</button>
+        <button type="button" class="tiny" id="settings-external-refresh">обновить</button>
+      </div>
+      <p class="sub" id="settings-external-hint"></p>
+      <p class="sub">Описание API: <a href="${escapeAttr(phone.openapi || "/api/openapi.json")}" target="_blank" rel="noopener">openapi.json</a>
+        · проверка: <code>curl ${escapeHtml((phone.urls || [])[0] || location.origin)}/api/health</code></p>
+    </div>`;
+
+  // 0.0.0.0 plus a public address outside the LAN is the "internet" setup.
+  if (saved.mode === "lan" && s.saved.public_base_url && !isLanUrl(s.saved.public_base_url)) saved.mode = "internet";
+  box.querySelectorAll('input[name="listen"]').forEach((r) => {
+    r.checked = r.value === saved.mode;
+    r.onchange = renderPublicSuggest;
+  });
+  if (saved.mode === "ip") $("settings-ip").value = saved.host;
+  $("settings-ip").onchange = () => {
+    box.querySelector('input[name="listen"][value="ip"]').checked = true;
+    renderPublicSuggest();
+  };
+  $("settings-port").value = saved.port;
+  $("settings-port").oninput = renderPublicSuggest;
+  $("settings-public").value = s.saved.public_base_url || "";
+  $("settings-library").value = s.saved.library || "";
+  renderPublicSuggest();
+
+  $("settings-browse").onclick = () => {
+    const el = $("settings-browser");
+    if (!el.hidden) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    browseSettingsDir($("settings-library").value.trim()).catch(() => browseSettingsDir(""));
+  };
+  $("settings-save").onclick = () => saveSettings().catch((e) => toast(e.message || String(e)));
+  $("settings-restart").onclick = () => restartServer().catch((e) => toast(e.message || String(e)));
+  box.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => copyText(b.dataset.copy)));
+  $("settings-external-refresh").onclick = () => loadExternalIp(true);
+  $("settings-qr-url").onchange = () => showQr(!$("settings-qr-box").hidden);
+  $("settings-qr-show").onclick = () => showQr($("settings-qr-box").hidden);
+  $("settings-public").addEventListener("input", renderQrOptions);
+  renderQrOptions();
+  $("settings-external-copy").onclick = () => copyText(settingsExternalIp);
+  loadExternalIp(false);
+  const show = $("settings-token-show");
+  if (show) {
+    show.onclick = () => {
+      const code = $("settings-token");
+      const open = code.dataset.open === "1";
+      code.textContent = open ? "••••••••••••••••" : phone.token;
+      code.dataset.open = open ? "0" : "1";
+      show.textContent = open ? "показать" : "скрыть";
+    };
+    $("settings-token-copy").onclick = () => copyText(phone.token);
+  }
+}
+
+// The external address from the settings field (a domain or an IP outside the
+// home network), or "" when none is set.
+function externalAddress() {
+  const pub = ($("settings-public")?.value || "").trim().replace(/\/+$/, "");
+  return pub && !isLanUrl(pub) ? pub : "";
+}
+
+// Addresses the QR can carry. A configured external address is the address:
+// the QR carries only it, in any mode. In the "internet" mode without one the
+// external IP is offered; a phone on mobile data cannot reach 192.168.x.x.
+function qrUrlOptions() {
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value;
+  const port = Number($("settings-port")?.value) || 8787;
+  const external = externalAddress();
+  if (external) return [external];
+  const out = [];
+  const add = (u) => {
+    if (u && !out.includes(u)) out.push(u);
+  };
+  if (mode === "internet") {
+    if (settingsExternalIp) add(`http://${settingsExternalIp.includes(":") ? `[${settingsExternalIp}]` : settingsExternalIp}:${port}`);
+    return out;
+  }
+  (settingsData.phone?.urls || []).forEach(add);
+  return out.filter((u) => !/^https?:\/\/(127\.|localhost|\[::1\])/.test(u));
+}
+
+function renderQrOptions() {
+  const sel = $("settings-qr-url");
+  if (!sel) return;
+  const prev = sel.value;
+  const opts = qrUrlOptions();
+  sel.innerHTML = opts.map((u) => `<option>${escapeHtml(u)}</option>`).join("");
+  if (opts.includes(prev)) sel.value = prev;
+  const internet = document.querySelector('#settings-box input[name="listen"]:checked')?.value === "internet";
+  const note = $("settings-qr-note");
+  sel.disabled = !opts.length;
+  $("settings-qr-show").disabled = !opts.length;
+  note.textContent = opts.length
+    ? externalAddress()
+      ? "В QR — внешний адрес из настроек: телефон подключится к нему откуда угодно."
+      : internet
+      ? "Режим «Интернет»: в QR только внешний адрес (домен или внешний IP)."
+      : "Телефон должен быть в той же сети Wi-Fi, что и компьютер."
+    : internet
+      ? "Укажи внешний адрес выше (домен или IP в интернете) — без него QR не сделать."
+      : "Нет адреса для телефона: выбери «Вся домашняя сеть» и перезапусти сервер.";
+  if (!opts.length) $("settings-qr-box").hidden = true;
+  else if (!$("settings-qr-box").hidden) showQr(true);
+}
+
+function showQr(visible) {
+  const box = $("settings-qr-box");
+  const url = $("settings-qr-url").value;
+  box.hidden = !visible || !url;
+  $("settings-qr-show").textContent = box.hidden ? "Показать QR" : "Скрыть QR";
+  if (!box.hidden) $("settings-qr-img").src = `/api/settings/qr?url=${encodeURIComponent(url)}`;
+}
+
+// The server asks api.ipify.org (cached on the server for 10 minutes).
+async function loadExternalIp(refresh) {
+  const code = $("settings-external-ip");
+  const hint = $("settings-external-hint");
+  if (!code) return;
+  code.textContent = "…";
+  try {
+    const data = await api(`/api/settings/external-ip${refresh ? "?refresh=1" : ""}`);
+    settingsExternalIp = data.ip || "";
+  } catch (e) {
+    settingsExternalIp = "";
+    code.textContent = "не удалось узнать";
+    hint.textContent = "Нет связи с интернетом или сервис недоступен — нажми «обновить» позже.";
+    $("settings-external-copy").hidden = true;
+    return;
+  }
+  code.textContent = settingsExternalIp;
+  $("settings-external-copy").hidden = !settingsExternalIp;
+  renderQrOptions();
+  const own = (settingsData.local_ips || []).includes(settingsExternalIp);
+  hint.textContent = own
+    ? "Этот IP назначен самому компьютеру — роутер не нужен, достаточно открыть порт в брандмауэре."
+    : "Это адрес роутера. Чтобы открыть сервер из интернета, пробрось на роутере порт на этот компьютер. " +
+      "Если провайдер даёт «серый» IP (общий на многих), проброс не поможет — используй Tailscale или Cloudflare Tunnel.";
+  renderPublicSuggest();
+}
+
+function settingsListenAddr() {
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value || "lan";
+  const port = Number($("settings-port").value) || 8787;
+  if (mode === "local") return `127.0.0.1:${port}`;
+  if (mode === "ip") return `${$("settings-ip").value}:${port}`;
+  return `0.0.0.0:${port}`;
+}
+
+function isLanUrl(raw) {
+  let host = "";
+  try {
+    host = new URL(raw).hostname;
+  } catch (_) {
+    return true;
+  }
+  if (host === "localhost" || host.endsWith(".local")) return true;
+  const m = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+}
+
+// One-click values for the phone address: http://<this computer's IP>:<port>.
+function renderPublicSuggest() {
+  const el = $("settings-public-suggest");
+  if (!el) return;
+  const port = Number($("settings-port").value) || 8787;
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value;
+  const internet = mode === "internet";
+  $("settings-internet").hidden = !internet;
+  renderQrOptions();
+  $("settings-public-label").textContent = internet
+    ? "Внешний адрес сервера (домен или IP в интернете)"
+    : "Адрес для телефона и ссылок «Поделиться»";
+  $("settings-public").placeholder = internet ? "https://music.example.com" : "http://192.168.1.5:8787";
+  const ips =
+    mode === "ip"
+      ? [$("settings-ip").value]
+      : mode === "local"
+        ? []
+        : internet
+          ? settingsExternalIp ? [settingsExternalIp] : []
+          : settingsData.local_ips || [];
+  el.innerHTML = ips
+    .map((ip) => {
+      const url = `http://${ip.includes(":") ? `[${ip}]` : ip}:${port}`; // IPv6 needs brackets
+      return `<button type="button" class="chip" data-url="${escapeAttr(url)}">${escapeHtml(url)}</button>`;
+    })
+    .join("");
+  el.querySelectorAll("[data-url]").forEach((b) => (b.onclick = () => ($("settings-public").value = b.dataset.url)));
+}
+
+async function browseSettingsDir(path) {
+  const el = $("settings-browser");
+  const data = await api(`/api/settings/dirs?path=${encodeURIComponent(path || "")}`);
+  settingsDirPath = data.path || "";
+  el.innerHTML = `
+    <div class="settings-browser-head">
+      <button type="button" class="tiny" data-dir="${escapeAttr(data.parent || "")}" ${data.path ? "" : "disabled"}>↑ выше</button>
+      <code>${escapeHtml(data.path || "Диски")}</code>
+      <button type="button" class="tiny primary-tiny" id="settings-pick" ${data.path ? "" : "disabled"}>Выбрать эту папку</button>
+    </div>
+    <div class="settings-roots">${(data.roots || [])
+      .map((r) => `<button type="button" class="chip" data-dir="${escapeAttr(r.path)}">${escapeHtml(r.name)}</button>`)
+      .join("")}</div>
+    <ul class="settings-dirs">${
+      (data.dirs || []).length
+        ? data.dirs
+            .map((d) => `<li><button type="button" class="linkish" data-dir="${escapeAttr(d.path)}">📁 ${escapeHtml(d.name)}</button></li>`)
+            .join("")
+        : '<li class="sub">Вложенных папок нет</li>'
+    }</ul>`;
+  el.querySelectorAll("[data-dir]").forEach((b) => {
+    b.onclick = () => browseSettingsDir(b.dataset.dir).catch((e) => toast(e.message || String(e)));
+  });
+  $("settings-pick").onclick = () => {
+    $("settings-library").value = settingsDirPath;
+    el.hidden = true;
+  };
+}
+
+async function saveSettings() {
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value;
+  const publicUrl = $("settings-public").value.trim();
+  if (mode === "internet" && (!publicUrl || isLanUrl(publicUrl))) {
+    toast("Для доступа из интернета укажи внешний адрес: домен, Tailscale-IP или белый IP");
+    $("settings-public").focus();
+    return;
+  }
+  const body = {
+    addr: settingsListenAddr(),
+    public_base_url: $("settings-public").value.trim(),
+    library: $("settings-library").value.trim(),
+  };
+  const libraryChanged = body.library !== settingsData.saved.library;
+  settingsData = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
+  if (libraryChanged) settingsData.rescan_after_restart = true;
+  renderSettings();
+  toast(settingsData.restart_pending ? "Сохранено — нужен перезапуск" : "Сохранено");
+}
+
+// Where this page will live after the restart: the listen address or port may
+// have changed.
+function urlAfterRestart(s) {
+  const next = splitListenAddr(s.saved.addr);
+  const loopbackPage = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+  if (loopbackPage || next.mode === "local") return `http://127.0.0.1:${next.port}`;
+  if (next.mode === "ip") return `http://${next.host}:${next.port}`;
+  return `${location.protocol}//${location.hostname}:${next.port}`;
+}
+
+async function restartServer() {
+  const s = settingsData;
+  if (!s.restart_supported) {
+    toast("Перезапусти сервер вручную: scripts/start-musik.ps1 -Restart или scripts/musik.sh restart");
+    return;
+  }
+  const target = urlAfterRestart(s);
+  const sameOrigin = target === location.origin;
+  const rescan = !!s.rescan_after_restart;
+  const btn = $("settings-restart");
+  btn.disabled = true;
+  btn.textContent = "Перезапуск…";
+  pushPlaybackState({ playing: false, keepalive: true });
+  await api("/api/settings/restart", { method: "POST", body: "{}" });
+  if (!sameOrigin) {
+    // Another address or port: the new server is not reachable from here.
+    setTimeout(() => (location.href = target), 8000);
+    toast(`Сервер переезжает на ${target}`);
+    return;
+  }
+  await new Promise((r) => setTimeout(r, 3000));
+  for (let i = 0; i < 60; i++) {
+    try {
+      const res = await fetch("/api/health", { cache: "no-store" });
+      if (res.ok) {
+        if (rescan) await api("/api/library/rescan", { method: "POST", body: "{}" }).catch(() => {});
+        location.reload();
+        return;
+      }
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  btn.disabled = false;
+  btn.textContent = "Перезапустить сервер";
+  toast("Сервер не ответил за минуту — проверь логи в папке data");
+}
+
 async function loadProfile() {
   const [p, week, rec] = await Promise.all([
     api("/api/profile"),
@@ -2434,7 +2877,9 @@ function wireAudio() {
   audio.addEventListener("play", () => {
     setPlayIcon(true);
     updatePositionState();
-    pushPlaybackState();
+    // Playing here takes the shared state over from any other device.
+    syncOwner = true;
+    pushPlaybackState({ playing: true, claim: true });
   });
   audio.addEventListener("pause", () => {
     if (seeking || audio.seeking) return;
@@ -2446,9 +2891,7 @@ function wireAudio() {
   audio.addEventListener("seeked", () => {
     finishSeek();
     updatePositionState();
-    // Playing here takes the shared state over from any other device.
-    syncOwner = true;
-    pushPlaybackState({ playing: true, claim: true });
+    pushPlaybackState();
   });
   audio.addEventListener("ended", () => {
     const id = Number(audio.dataset.trackId || 0);
