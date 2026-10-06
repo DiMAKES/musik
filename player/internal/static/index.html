@@ -39,7 +39,7 @@
   <title>musik</title>
   <link rel="stylesheet" href="/fonts.css" />
   <link rel="stylesheet" href="/themes/base.css" />
-  <link rel="stylesheet" href="/style.css?v=retro15" />
+  <link rel="stylesheet" href="/style.css?v=retro16" />
   <script>
     (function () {
       try {
@@ -316,6 +316,20 @@
           <input id="lib-filter" type="search" placeholder="Поиск…" autocomplete="off" />
           <select id="lib-sort" aria-label="Сортировка"></select>
         </div>
+        <div id="lib-artist-head" class="lib-artist-head" hidden>
+          <button type="button" class="text-link" id="lib-artist-back">← все артисты</button>
+          <div class="lib-artist-title">
+            <div>
+              <h2 id="lib-artist-name"></h2>
+              <p class="sub" id="lib-artist-meta"></p>
+            </div>
+          </div>
+          <div class="lib-artist-actions">
+            <button type="button" class="tiny" id="lib-artist-play">▶ Слушать всё</button>
+            <button type="button" class="tiny" id="lib-artist-radio">Радио</button>
+            <button type="button" class="tiny" id="lib-artist-playlist">В плейлист</button>
+          </div>
+        </div>
         <ul id="lib-list" class="track-list"></ul>
         <div id="lib-grid" class="lib-grid" hidden></div>
       </section>
@@ -515,6 +529,6 @@
     </div>
   </div>
   <div id="toast" class="toast" hidden></div>
-  <script src="/app.js?v=retro15"></script>
+  <script src="/app.js?v=retro16"></script>
 </body>
 </html>

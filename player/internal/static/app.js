@@ -45,7 +45,8 @@ function deviceId() {
   return navigator.userAgentData?.platform || navigator.platform || "web";
 }
 
-let sessionId = sessionStorage.getItem("musik_session") || null;
+// localStorage, not sessionStorage: the session must survive closing the tab.
+let sessionId = localStorage.getItem("musik_session") || null;
 let current = null;
 let playlist = [];
 let currentQueue = [];
@@ -56,6 +57,7 @@ let listenedAccum = 0;
 let lastPos = 0;
 let library = [];
 let libTab = "tracks";
+let libArtist = null; // artist page open inside the "artists" tab
 let libSort = "artist";
 let plAddTab = "tracks";
 let plAddSort = "artist";
@@ -160,8 +162,7 @@ async function doLogin(password) {
 
 async function doLogout() {
   await api("/api/auth/logout", { method: "POST", body: "{}" });
-  sessionStorage.removeItem("musik_session");
-  sessionId = null;
+  setSession(null);
   if (authEnabled) {
     showLogin();
     authReady = false;
@@ -197,8 +198,11 @@ function fmtTime(sec) {
 }
 
 function setSession(id) {
-  sessionId = id;
-  if (id) sessionStorage.setItem("musik_session", id);
+  sessionId = id || null;
+  try {
+    if (id) localStorage.setItem("musik_session", id);
+    else localStorage.removeItem("musik_session");
+  } catch (_) {}
 }
 
 function setSeekPct(pct) {
@@ -525,6 +529,12 @@ function sortAlbums(list, sort) {
 }
 
 function catalogSortOptions(tab) {
+  if (tab === "artist-page") {
+    return [
+      ["album", "по альбому"],
+      ["title", "по песне"],
+    ];
+  }
   if (tab === "artists") {
     return [
       ["name", "по имени"],
@@ -763,18 +773,16 @@ function applyPlayPayload(data, { autoplay = true } = {}) {
   }
   if (data.current) {
     if (autoplay) renderNow(data.current);
-    else {
-      current = data.current;
-      updateMini(data.current);
-      updateMediaSession(data.current);
-      $("title").textContent = data.current.title || "—";
-      $("artist").textContent = [data.current.artist, data.current.album].filter(Boolean).join(" · ");
-      setNowSource(data.current.source);
-    }
+    // Restoring: load the track paused and do not announce a new listen.
+    else renderNow(data.current, { autoplay: false, announce: false });
   }
 }
 
-function renderNow(track) {
+// autoplay=false loads the track paused (resume after reload / from another
+// device); startAt and listened restore the position and the listened time so
+// the eventual track_end reports the whole listen; announce=false skips
+// track_start because that listen was already started elsewhere.
+function renderNow(track, { autoplay = true, startAt = 0, listened = 0, announce = true } = {}) {
   current = track;
   const art = $("art");
   if (!track) {
@@ -806,17 +814,33 @@ function renderNow(track) {
     audio.dataset.trackId = String(track.id);
     audio.dataset.gen = String(gen);
     audio.src = url;
-    audio.play().then(() => setPlayIcon(true)).catch(() => setPlayIcon(false));
-    listenedAccum = 0;
-    lastPos = 0;
-    $("seek").value = 0;
-    setSeekPct(0);
-    $("time-cur").textContent = "0:00";
-    $("time-dur").textContent = fmtTime(track.duration || 0);
+    const at = Math.max(0, Number(startAt) || 0);
+    if (at > 0) {
+      audio.addEventListener(
+        "loadedmetadata",
+        () => {
+          if (audio.dataset.gen !== String(gen)) return;
+          // lastPos first, so timeupdate does not count the jump as listening.
+          lastPos = Math.min(at, audio.duration || at);
+          audio.currentTime = lastPos;
+        },
+        { once: true }
+      );
+    }
+    if (autoplay) audio.play().then(() => setPlayIcon(true)).catch(() => setPlayIcon(false));
+    else setPlayIcon(false);
+    listenedAccum = Math.max(0, Number(listened) || 0);
+    lastPos = at;
+    const dur = track.duration || 0;
+    const pctAt = dur > 0 ? (at / dur) * 100 : 0;
+    $("seek").value = Math.round(pctAt * 10);
+    setSeekPct(pctAt);
+    $("time-cur").textContent = fmtTime(at);
+    $("time-dur").textContent = fmtTime(dur);
     setRatingUI(null);
     setFavoriteUI(favoriteIds.has(track.id));
     setEntityFavChips();
-    postEvent("track_start", { track_id: track.id }).catch(() => {});
+    if (announce) postEvent("track_start", { track_id: track.id }).catch(() => {});
     loadLyrics(track.id);
   } else {
     setFavoriteUI(favoriteIds.has(track.id));
@@ -1258,8 +1282,7 @@ function renderEntityShelf(el, items, kind) {
           )
         )
       );
-      btn.onclick = () =>
-        playFixed({ artist: item.artist }).catch((e) => toast(e.message || String(e)));
+      btn.onclick = () => openArtist(item.artist);
     } else if (kind === "album") {
       const on = favoriteAlbums.has(albumKey(item.artist, item.album));
       btn.className = "mix-card entity-card";
@@ -1513,7 +1536,9 @@ function setLibTab(tab) {
   const ph = $("lib-filter");
   if (ph) {
     ph.placeholder =
-      tab === "artists"
+      tab === "artists" && libArtist
+        ? "Поиск по трекам артиста…"
+        : tab === "artists"
         ? "Поиск артиста…"
         : tab === "albums"
           ? "Поиск альбома…"
@@ -1521,7 +1546,7 @@ function setLibTab(tab) {
             ? "Поиск в избранном…"
             : "Артист, трек, альбом…";
   }
-  libSort = fillSortSelect($("lib-sort"), tab, libSort);
+  libSort = fillSortSelect($("lib-sort"), tab === "artists" && libArtist ? "artist-page" : tab, libSort);
   renderLib(ph?.value || "");
 }
 
@@ -1538,6 +1563,12 @@ function renderLib(q) {
   const ul = $("lib-list");
   const grid = $("lib-grid");
   if (!ul || !grid) return;
+  const artistPage = libTab === "artists" && !!libArtist;
+  $("lib-artist-head").hidden = !artistPage;
+  if (artistPage) {
+    renderArtistPage(qq);
+    return;
+  }
 
   if (libTab === "tracks" || libTab === "favorites") {
     ul.hidden = false;
@@ -1555,59 +1586,13 @@ function renderLib(q) {
       ul.innerHTML = '<li class="sub" style="padding:.8rem 0">Избранное пусто — жми ♥ в плеере</li>';
       return;
     }
-    sortTracks(
-      source.filter((t) => !qq || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(qq)),
-      libSort
-    )
-      .slice(0, 400)
-      .forEach((t) => {
-        const li = document.createElement("li");
-        li.className = "track-row";
-        const isFav = favoriteIds.has(t.id);
-        li.innerHTML = `
-          <button type="button" class="linkish">${isFav ? "♥ " : ""}${t.ready === false ? "… " : ""}${escapeHtml(t.artist)} — ${escapeHtml(t.title)}</button>
-          <span class="dur">${fmtTime(t.duration || 0)}</span>
-          <span class="row-actions">
-            <button type="button" class="tiny" data-act="track">Трек</button>
-            <button type="button" class="tiny" data-act="fav">${isFav ? "Убрать ♥" : "♥"}</button>
-            <button type="button" class="tiny" data-act="album">Альбом</button>
-            <button type="button" class="tiny" data-act="artist">Артист</button>
-            <button type="button" class="tiny" data-act="later">Потом</button>
-            <button type="button" class="tiny" data-act="playlist">Плейлист</button>
-            <button type="button" class="tiny" data-act="radio">Радио</button>
-          </span>`;
-        li.querySelector(".linkish").onclick = () =>
-          playFixed({ track_id: t.id, name: t.title }).catch((e) => toast(e.message || String(e)));
-        li.querySelectorAll("[data-act]").forEach((btn) => {
-          btn.onclick = async (e) => {
-            e.stopPropagation();
-            const act = btn.dataset.act;
-            try {
-              if (act === "track") await playFixed({ track_id: t.id, name: t.title });
-              else if (act === "fav") {
-                await toggleFavorite({ type: "track", track_id: t.id }, { withLike: false });
-                renderLib($("lib-filter").value || "");
-              } else if (act === "album") {
-                if (!t.album) return toast("У трека нет альбома");
-                await playFixed({ artist: t.artist, album: t.album });
-              } else if (act === "artist") {
-                if (!t.artist) return toast("Нет артиста");
-                await playFixed({ artist: t.artist });
-              } else if (act === "later") {
-                await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: t.id }) });
-                toast("В «Потом»");
-              } else if (act === "playlist") {
-                await pickPlaylistForTrack(t.id);
-              } else if (act === "radio") {
-                await startRadio(t.id);
-              }
-            } catch (err) {
-              toast(err.message || String(err));
-            }
-          };
-        });
-        ul.appendChild(li);
-      });
+    renderTrackRows(
+      ul,
+      sortTracks(
+        source.filter((t) => !qq || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(qq)),
+        libSort
+      ).slice(0, 400)
+    );
     return;
   }
 
@@ -1630,7 +1615,7 @@ function renderLib(q) {
           <strong>${escapeHtml(a.artist)}</strong>
           <span>${a.tracks} треков</span>
           <div class="mix-meta">
-            слушать
+            открыть
             <span class="tiny tile-pl" data-act="playlist">в плейлист</span>
           </div>`;
         btn.onclick = (e) => {
@@ -1641,7 +1626,8 @@ function renderLib(q) {
             );
             return;
           }
-          playFixed({ artist: a.artist }).catch((err) => toast(err.message || String(err)));
+          // Opening an artist only shows the tracks; playback is an explicit button.
+          openArtist(a.artist);
         };
         grid.appendChild(btn);
       });
@@ -1675,6 +1661,99 @@ function renderLib(q) {
       };
       grid.appendChild(btn);
     });
+}
+
+// Artist page inside the library: header with explicit play/radio buttons and
+// the artist's tracks. Nothing starts playing until the user picks something.
+function renderArtistPage(qq) {
+  const ul = $("lib-list");
+  const grid = $("lib-grid");
+  const tracks = tracksOfArtist(libArtist);
+  const albumCount = new Set(tracks.map((t) => (t.album || "").trim()).filter(Boolean)).size;
+  $("lib-artist-name").textContent = libArtist;
+  $("lib-artist-meta").textContent = `${tracks.length} треков${albumCount ? ` · ${albumCount} альбомов` : ""}`;
+  grid.hidden = true;
+  grid.innerHTML = "";
+  ul.hidden = false;
+  ul.innerHTML = "";
+  if (!tracks.length) {
+    ul.innerHTML = '<li class="sub" style="padding:.8rem 0">У артиста нет треков в библиотеке</li>';
+    return;
+  }
+  renderTrackRows(
+    ul,
+    sortTracks(
+      tracks.filter((t) => !qq || `${t.title} ${t.album}`.toLowerCase().includes(qq)),
+      libSort
+    ),
+    { listName: libArtist }
+  );
+}
+
+function openArtist(name) {
+  libTab = "artists";
+  libArtist = name;
+  const filter = $("lib-filter");
+  if (filter) filter.value = "";
+  setView("library");
+  window.scrollTo(0, 0);
+}
+
+// listName: when set, clicking a title plays the whole shown list starting at
+// that track (artist page) instead of the single track.
+function renderTrackRows(ul, tracks, { listName = "" } = {}) {
+  const playRow = (t) =>
+    listName
+      ? playFixed({ track_ids: tracks.map((x) => x.id), start_track_id: t.id, name: listName })
+      : playFixed({ track_id: t.id, name: t.title });
+  tracks.forEach((t) => {
+    const li = document.createElement("li");
+    li.className = "track-row";
+    const isFav = favoriteIds.has(t.id);
+    li.innerHTML = `
+      <button type="button" class="linkish">${isFav ? "♥ " : ""}${t.ready === false ? "… " : ""}${escapeHtml(t.artist)} — ${escapeHtml(t.title)}</button>
+      <span class="dur">${fmtTime(t.duration || 0)}</span>
+      <span class="row-actions">
+        <button type="button" class="tiny" data-act="track">Трек</button>
+        <button type="button" class="tiny" data-act="fav">${isFav ? "Убрать ♥" : "♥"}</button>
+        <button type="button" class="tiny" data-act="album">Альбом</button>
+        <button type="button" class="tiny" data-act="artist">Артист</button>
+        <button type="button" class="tiny" data-act="later">Потом</button>
+        <button type="button" class="tiny" data-act="playlist">Плейлист</button>
+        <button type="button" class="tiny" data-act="radio">Радио</button>
+      </span>`;
+    li.querySelector(".linkish").onclick = () =>
+      playRow(t).catch((e) => toast(e.message || String(e)));
+    li.querySelectorAll("[data-act]").forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const act = btn.dataset.act;
+        try {
+          if (act === "track") await playFixed({ track_id: t.id, name: t.title });
+          else if (act === "fav") {
+            await toggleFavorite({ type: "track", track_id: t.id }, { withLike: false });
+            renderLib($("lib-filter").value || "");
+          } else if (act === "album") {
+            if (!t.album) return toast("У трека нет альбома");
+            await playFixed({ artist: t.artist, album: t.album });
+          } else if (act === "artist") {
+            if (!t.artist) return toast("Нет артиста");
+            await playFixed({ artist: t.artist });
+          } else if (act === "later") {
+            await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: t.id }) });
+            toast("В «Потом»");
+          } else if (act === "playlist") {
+            await pickPlaylistForTrack(t.id);
+          } else if (act === "radio") {
+            await startRadio(t.id);
+          }
+        } catch (err) {
+          toast(err.message || String(err));
+        }
+      };
+    });
+    ul.appendChild(li);
+  });
 }
 
 const SOURCE_LABELS = {
@@ -2098,6 +2177,208 @@ function commitSeek() {
   if (Math.abs((audio.currentTime || 0) - t) < 0.05 && !audio.seeking) finishSeek();
 }
 
+// ---- Playback sync (reload resume + hand-off between devices) ----
+// The server keeps one "where am I listening" row. Only the tab that is
+// actually playing writes it (syncOwner); every other tab or device reads it,
+// pauses itself when someone else starts playing, and keeps its paused player
+// cued to the latest track and position, so pressing play continues there.
+const syncTabId = randomId(); // per page load: two tabs are two players
+const SYNC_WRITE_MS = 5000;
+const SYNC_POLL_MS = 5000;
+let syncOwner = false;
+let lastSyncWrite = 0;
+let lastSyncSeen = 0; // ms timestamp of the newest state already applied/written
+
+function syncStamp(st) {
+  const t = Date.parse(st?.updated_at || "");
+  return Number.isFinite(t) ? t : 0;
+}
+
+// claim=true when playback starts on this tab (takes the state over); other
+// writes are heartbeats the server accepts only while this tab still owns it.
+function pushPlaybackState({ playing, keepalive = false, claim = false } = {}) {
+  const audio = $("audio");
+  if (!syncOwner || !current?.id) return;
+  lastSyncWrite = Date.now();
+  const body = JSON.stringify({
+    session_id: sessionId || "",
+    track_id: current.id,
+    position_sec: audio.currentTime || 0,
+    listened_sec: listenedAccum,
+    playing: typeof playing === "boolean" ? playing : !audio.paused,
+    client_id: syncTabId,
+    claim,
+  });
+  fetch("/api/playback/state", {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive,
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d?.state) return;
+      if (d.ok) {
+        const at = syncStamp(d.state);
+        if (at > lastSyncSeen) lastSyncSeen = at;
+      } else {
+        // Another device claimed playback in the meantime.
+        lastSyncSeen = syncStamp(d.state);
+        yieldPlayback(d.state).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
+// Another device owns playback now: stop here (ownership first, so the pause
+// handler does not write back) and cue its track and position.
+async function yieldPlayback(st, track) {
+  const audio = $("audio");
+  syncOwner = false;
+  if (st.playing && !audio.paused) {
+    audio.pause();
+    setPlayIcon(false);
+    toast("Играет на другом устройстве");
+  }
+  if (audio.paused) await cuePlaybackState(st, track);
+}
+
+// Cue the given state into this (paused) player: same session, same track,
+// same position and listened time. Refreshes the queue/playlist when the
+// track changed, so next/prev continue the same list.
+async function cuePlaybackState(st, track) {
+  const audio = $("audio");
+  if (st.session_id && st.session_id !== sessionId) setSession(st.session_id);
+  if (current?.id === st.track_id && audio.src) {
+    if (Math.abs((audio.currentTime || 0) - st.position_sec) > 2) {
+      lastPos = st.position_sec;
+      audio.currentTime = st.position_sec;
+    }
+    listenedAccum = st.listened_sec || 0;
+    return;
+  }
+  let cueTrack = track;
+  if (sessionId) {
+    try {
+      const now = await api(`/api/now?session_id=${encodeURIComponent(sessionId)}`);
+      applyPlayPayload({ ...now, current: null }, { autoplay: false });
+      // /api/now carries impression_id for the session's current track, which
+      // ties the resumed listen to the original recommendation.
+      if (now?.current?.id === st.track_id) cueTrack = now.current;
+    } catch (_) {
+      setSession(null);
+    }
+  }
+  if (!cueTrack) return;
+  audio.dataset.trackId = "";
+  renderNow(cueTrack, {
+    autoplay: false,
+    announce: false,
+    startAt: st.position_sec,
+    listened: st.listened_sec,
+  });
+}
+
+// Boot: resume where the owner last listened (this or another device).
+async function restorePlayback() {
+  let data = null;
+  try {
+    data = await api("/api/playback/state");
+  } catch (_) {}
+  const st = data?.state;
+  if (st?.track_id) {
+    lastSyncSeen = syncStamp(st);
+    await cuePlaybackState(st, data.track);
+    return;
+  }
+  // No saved position yet: fall back to the session this browser remembers.
+  if (!sessionId) return;
+  try {
+    const now = await api(`/api/now?session_id=${encodeURIComponent(sessionId)}`);
+    if (now?.current) applyPlayPayload(now, { autoplay: false });
+  } catch (_) {
+    setSession(null);
+  }
+}
+
+async function pollPlaybackState() {
+  const audio = $("audio");
+  if (!authReady) return;
+  if (document.hidden && audio.paused) return;
+  let data;
+  try {
+    data = await api("/api/playback/state");
+  } catch (_) {
+    return;
+  }
+  const st = data?.state;
+  if (!st?.track_id || st.client_id === syncTabId) return;
+  const at = syncStamp(st);
+  if (at <= lastSyncSeen) return;
+  lastSyncSeen = at;
+  await yieldPlayback(st, data.track);
+}
+
+// After a deploy an open tab (a phone keeps them for days) would go on running
+// the old app.js, which knows nothing about new features such as the sync
+// above. /api/health reports a hash of the UI files; when it changes the page
+// reloads itself as soon as nothing is playing, and resumes where it was.
+const VERSION_CHECK_MS = 60000;
+let loadedStaticVersion = "";
+let reloadPending = false;
+
+async function checkStaticVersion() {
+  let health;
+  try {
+    const res = await fetch("/api/health", { cache: "no-store", credentials: "same-origin" });
+    health = await res.json();
+  } catch (_) {
+    return;
+  }
+  const v = health?.static || "";
+  if (!v) return;
+  if (!loadedStaticVersion) {
+    loadedStaticVersion = v;
+    return;
+  }
+  if (v !== loadedStaticVersion) {
+    reloadPending = true;
+    reloadIfIdle();
+  }
+}
+
+function reloadIfIdle() {
+  const audio = $("audio");
+  // "ended" and a skip also pause for a moment before the next track starts.
+  if (!reloadPending || (audio && (!audio.paused || audio.ended))) return;
+  pushPlaybackState({ playing: false, keepalive: true });
+  location.reload();
+}
+
+function wireSync() {
+  setInterval(() => pollPlaybackState().catch(() => {}), SYNC_POLL_MS);
+  checkStaticVersion();
+  setInterval(() => checkStaticVersion(), VERSION_CHECK_MS);
+  // iOS restores pages from the back/forward cache without a reload.
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+      checkStaticVersion();
+      pollPlaybackState().catch(() => {});
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) pushPlaybackState({ keepalive: true });
+    else {
+      checkStaticVersion();
+      pollPlaybackState().catch(() => {});
+    }
+  });
+  window.addEventListener("focus", () => pollPlaybackState().catch(() => {}));
+  // Closing the tab stops the music: save the position as paused.
+  window.addEventListener("pagehide", () => pushPlaybackState({ playing: false, keepalive: true }));
+}
+
 function wireAudio() {
   const audio = $("audio");
   const seek = $("seek");
@@ -2114,7 +2395,8 @@ function wireAudio() {
       $("time-dur").textContent = fmtTime(audio.duration);
     }
     const now = Date.now();
-    if (now - lastProgressAt > 4000 && current) {
+    if (!audio.paused && now - lastSyncWrite > SYNC_WRITE_MS) pushPlaybackState();
+    if (!audio.paused && now - lastProgressAt > 4000 && current) {
       lastProgressAt = now;
       postEvent("progress", {
         position_sec: pos,
@@ -2130,15 +2412,21 @@ function wireAudio() {
   audio.addEventListener("play", () => {
     setPlayIcon(true);
     updatePositionState();
+    pushPlaybackState();
   });
   audio.addEventListener("pause", () => {
     if (seeking || audio.seeking) return;
     setPlayIcon(false);
     updatePositionState();
+    pushPlaybackState({ playing: false });
+    if (reloadPending) setTimeout(reloadIfIdle, 3000);
   });
   audio.addEventListener("seeked", () => {
     finishSeek();
     updatePositionState();
+    // Playing here takes the shared state over from any other device.
+    syncOwner = true;
+    pushPlaybackState({ playing: true, claim: true });
   });
   audio.addEventListener("ended", () => {
     const id = Number(audio.dataset.trackId || 0);
@@ -3587,12 +3875,31 @@ function wire() {
   document.querySelectorAll("[data-lib-tab]").forEach((b) => {
     b.onclick = () => {
       libTab = b.dataset.libTab;
+      libArtist = null;
       setView("library");
     };
   });
   document.querySelectorAll("#view-library .seg-btn").forEach((b) => {
-    b.onclick = () => setLibTab(b.dataset.lib);
+    b.onclick = () => {
+      libArtist = null;
+      setLibTab(b.dataset.lib);
+    };
   });
+  $("lib-artist-back").onclick = () => {
+    libArtist = null;
+    setLibTab("artists");
+  };
+  $("lib-artist-play").onclick = () => {
+    if (libArtist) playFixed({ artist: libArtist }).catch((e) => toast(e.message || String(e)));
+  };
+  $("lib-artist-radio").onclick = () => {
+    const seed = tracksOfArtist(libArtist)[0];
+    if (seed) startRadio(seed.id).catch((e) => toast(e.message || String(e)));
+  };
+  $("lib-artist-playlist").onclick = () => {
+    const ids = tracksOfArtist(libArtist).map((t) => t.id);
+    if (ids.length) pickPlaylistForTracks(ids).catch((e) => toast(e.message || String(e)));
+  };
   $("lib-sort").onchange = () => {
     libSort = $("lib-sort").value;
     renderLib($("lib-filter").value || "");
@@ -3776,20 +4083,11 @@ async function bootApp() {
     .catch(console.error);
   loadMixes().catch(console.error);
   loadHomeCatalog().catch(console.error);
-  if (sessionId) {
-    api(`/api/now?session_id=${encodeURIComponent(sessionId)}`)
-      .then((now) => {
-        if (!now?.current) return;
-        applyPlayPayload(now, { autoplay: false });
-      })
-      .catch(() => {
-        sessionStorage.removeItem("musik_session");
-        sessionId = null;
-      });
-  }
+  restorePlayback().catch(console.error);
 }
 
 wireAudio();
+wireSync();
 wire();
 
 $("login-form").onsubmit = (e) => {

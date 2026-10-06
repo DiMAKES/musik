@@ -479,6 +479,25 @@ button:focus-visible, input:focus-visible, summary:focus-visible, a:focus-visibl
   background: var(--accent-soft);
   color: var(--fg);
 }
+.lib-artist-head {
+  margin: 0 0 1rem;
+}
+.lib-artist-head h2 {
+  margin: .35rem 0 .15rem;
+  font-size: 1.45rem;
+  overflow-wrap: anywhere;
+}
+.lib-artist-head .sub { margin: 0 0 .6rem; }
+.lib-artist-title {
+  display: flex;
+  align-items: center;
+  gap: .9rem;
+}
+.lib-artist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+}
 .lib-tools {
   display: flex;
   gap: .55rem;

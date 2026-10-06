@@ -589,6 +589,26 @@ def _artist_segments(conn: sqlite3.Connection) -> None:
     _add_column(conn, "tracks", "artist_segments TEXT")
 
 
+def _playback_state(conn: sqlite3.Connection) -> None:
+    # One row per owner: which session/track was playing, where, and on which
+    # device. A page reload or another device reads it to resume the track at
+    # the same position; listened_sec keeps the listen statistics continuous.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS playback_state (
+            owner_scope TEXT PRIMARY KEY DEFAULT 'local',
+            session_id TEXT NOT NULL DEFAULT '',
+            track_id INTEGER NOT NULL DEFAULT 0,
+            position_sec REAL NOT NULL DEFAULT 0,
+            listened_sec REAL NOT NULL DEFAULT 0,
+            playing INTEGER NOT NULL DEFAULT 0,
+            client_id TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 MIGRATIONS = (
     Migration(1, "baseline", _baseline),
     Migration(2, "future_data_foundation", _future_data_foundation),
@@ -597,6 +617,7 @@ MIGRATIONS = (
     Migration(5, "ranker_and_explore", _ranker_and_explore),
     Migration(6, "remaster_marker", _remaster_marker),
     Migration(7, "artist_segments", _artist_segments),
+    Migration(8, "playback_state", _playback_state),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 
