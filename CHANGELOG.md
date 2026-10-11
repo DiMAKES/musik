@@ -39,3 +39,8 @@
 
 #### Добавлено
 - Устанавливаемая тема Night Record Shelf (`themes/night-shelf`) со своими шрифтами — [`d9e70fc`](https://github.com/torwin-job/musik/commit/d9e70fc83ce0074ea529f15f15995845c45a62f2) ([@anatoliiii](https://github.com/anatoliiii))
+
+### Сборники
+
+#### Исправлено
+- Сборник с «Разными артистами» остаётся одним альбомом, а не распадается по исполнителям треков; скан читает исполнителя альбома и флаг сборника (миграция 10) и один раз перечитывает теги без анализа аудио — [`a1aad17`](https://github.com/torwin-job/musik/commit/a1aad1714ff7231d92954c6b1d5802787112a012) ([@anatoliiii](https://github.com/anatoliiii))
