@@ -274,3 +274,41 @@ def test_interrupted_playback_ownership_rolls_back_and_retries(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
         assert conn.execute("SELECT profile_id,position_sec FROM playback_state").fetchone()[1] == 42
     assert migrate_db(path) == LATEST_SCHEMA_VERSION
+
+
+def test_home_postgres_v8_upgrade_preserves_owned_data(empty_postgres_database, tmp_path):
+    """The deployed fork's Alembic v8 is distinct from upstream SQLite v8."""
+    from sqlalchemy import create_engine, inspect, text
+    from musik.db.migrations import migrate_database
+
+    url = empty_postgres_database
+    migrate_database(url, tmp_path / 'unused.db')
+    engine = create_engine(url.replace('postgresql://', 'postgresql+psycopg://', 1))
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO tracks(id,path,title,created_at,updated_at) VALUES (1,'/preserved.flac','Preserved','now','now')"))
+        profile = conn.scalar(text("SELECT value FROM installation_state WHERE key='legacy_profile_id'"))
+        user = conn.scalar(text("SELECT value FROM installation_state WHERE key='legacy_user_id'"))
+        conn.execute(text("INSERT INTO listening_history(profile_id,track_id,ts,action) VALUES (:p,1,'now','finish')"), {'p': profile})
+        conn.execute(text("INSERT INTO favorites(profile_id,track_id,added_at,position) VALUES (:p,1,'now',0)"), {'p': profile})
+        conn.execute(text("INSERT INTO external_identities(issuer,subject,user_id,created_at) VALUES ('https://issuer.test','subject',:u,'now')"), {'u': user})
+        conn.execute(text("INSERT INTO device_tokens(id,secret_hash,user_id,profile_id,name,created_at,expires_at) VALUES ('device','test-hash',:u,:p,'Device','now','2099')"), {'u': user, 'p': profile})
+        for table in ('artist_photos', 'artwork_lookups', 'playback_state'):
+            conn.execute(text(f'DROP TABLE {table}'))
+        for column in ('is_remaster', 'artist_segments', 'album_artist', 'is_compilation'):
+            conn.execute(text(f'ALTER TABLE tracks DROP COLUMN {column}'))
+        conn.execute(text('ALTER TABLE external_identities DROP COLUMN password_hash'))
+        conn.execute(text("UPDATE alembic_version SET version_num='musik_8'"))
+    try:
+        assert migrate_database(url, tmp_path / 'unused.db') == 14
+        assert migrate_database(url, tmp_path / 'unused.db') == 14
+        with engine.connect() as conn:
+            assert conn.scalar(text('SELECT version_num FROM alembic_version')) == 'musik_14'
+            assert conn.execute(text('SELECT title,is_remaster,is_compilation FROM tracks')).one() == ('Preserved', 0, 0)
+            assert conn.execute(text('SELECT profile_id,track_id FROM favorites')).one() == (profile, 1)
+            assert conn.execute(text('SELECT profile_id,track_id FROM listening_history')).one() == (profile, 1)
+            assert conn.execute(text('SELECT user_id,profile_id FROM device_tokens')).one() == (user, profile)
+            assert conn.execute(text('SELECT user_id,password_hash FROM external_identities')).one() == (user, None)
+            assert conn.scalar(text('SELECT count(*) FROM users')) == 1
+            assert {'artist_photos', 'artwork_lookups', 'playback_state'} <= set(inspect(conn).get_table_names())
+    finally:
+        engine.dispose()
