@@ -21,3 +21,8 @@
 #### Исправлено
 - Поиск обложек в iTunes — [#19](https://github.com/torwin-job/musik/pull/19), [`5e72588`](https://github.com/torwin-job/musik/commit/5e7258839058a84a8dd622bfac8048552ea370a6) ([@DiMAKES](https://github.com/DiMAKES))
 - Радио пропускает FLAC с ID3-тегом в начале и треки, которые браузер не может открыть — [#21](https://github.com/torwin-job/musik/pull/21), [`c83ad7f`](https://github.com/torwin-job/musik/commit/c83ad7f6406a0a37f313e93ed668d2e1ce8c36c0) ([@DiMAKES](https://github.com/DiMAKES))
+
+### Тесты на настоящей схеме
+
+#### Изменено
+- Go-тесты запускаются на схеме, выгруженной из миграций (`scripts/go_test_schema.py`), а не на устаревшем ручном дампе; `pytest` проверяет, что выгрузка актуальна — [`48d7410`](https://github.com/torwin-job/musik/commit/48d74104c01e3202325b3816f6dc1ace79bffd01) ([@anatoliiii](https://github.com/anatoliiii))
