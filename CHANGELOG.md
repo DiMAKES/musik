@@ -34,3 +34,8 @@
 
 #### Исправлено
 - Android не обрывает воспроизведение на первом Range-запросе: мобильная версия трека готовится до первого байта; перекодирование ограничено половиной ядер, кеш в памяти — 64 МиБ на процесс — [`5fa6066`](https://github.com/torwin-job/musik/commit/5fa60661120b1692a76e2f50e122a224532e58d7) ([@anatoliiii](https://github.com/anatoliiii))
+
+### Тема Night Record Shelf
+
+#### Добавлено
+- Устанавливаемая тема Night Record Shelf (`themes/night-shelf`) со своими шрифтами — [`d9e70fc`](https://github.com/torwin-job/musik/commit/d9e70fc83ce0074ea529f15f15995845c45a62f2) ([@anatoliiii](https://github.com/anatoliiii))
