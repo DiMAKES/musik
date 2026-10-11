@@ -114,9 +114,9 @@ func TestUserPlaylistsVisibleAndRemovable(t *testing.T) {
 	store, _ := openTestStore(t)
 	insertTracks(t, store, 2)
 	if _, err := store.DB.Exec(`
-INSERT INTO playlists(id, kind, name, created_at, type) VALUES
- (21, 'user', 'Старый', '2026-01-01T00:00:00Z', 'generated'),
- (22, 'daily', 'Микс', '2026-01-01T00:00:00Z', 'generated')`); err != nil {
+INSERT INTO playlists(id, kind, name, created_at, type, profile_id) VALUES
+ (21, 'user', 'Старый', '2026-01-01T00:00:00Z', 'generated', ?),
+ (22, 'daily', 'Микс', '2026-01-01T00:00:00Z', 'generated', ?)`, store.ProfileID, store.ProfileID); err != nil {
 		t.Fatal(err)
 	}
 	list, err := store.ListUserPlaylists(nil, false)
@@ -127,8 +127,8 @@ INSERT INTO playlists(id, kind, name, created_at, type) VALUES
 		t.Fatalf("list=%+v", list)
 	}
 	if _, err := store.DB.Exec(`
-INSERT INTO playlist_tracks(item_id, playlist_id, position, track_id, added_at, source)
-VALUES ('', 21, 0, 1, '2026-01-01T00:00:00Z', 'manual')`); err != nil {
+INSERT INTO playlist_tracks(item_id, playlist_id, position, track_id, added_at, source, profile_id)
+VALUES ('', 21, 0, 1, '2026-01-01T00:00:00Z', 'manual', ?)`, store.ProfileID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RemovePlaylistItem(21, "1"); err != nil {

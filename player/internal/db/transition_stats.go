@@ -82,30 +82,30 @@ func (s *Store) RecordOutcomeTransition(fromID, toID int64, outcome, provenance 
 	var prevWeight float64
 	var prevUpdated string
 	_ = s.DB.QueryRow(
-		`SELECT decayed_weight, updated_at FROM transition_stats WHERE from_id = ? AND to_id = ?`,
-		fromID, toID,
+		`SELECT decayed_weight, updated_at FROM transition_stats WHERE profile_id = ? AND from_id = ? AND to_id = ?`,
+		s.ProfileID, fromID, toID,
 	).Scan(&prevWeight, &prevUpdated)
 	decayed := DecayTransitionWeight(prevWeight, prevUpdated, now) + delta
 	_, err := s.DB.Exec(`
 INSERT INTO transition_stats(
   from_id, to_id, manual_count, radio_count, finished_count, partial_count,
-  skip_count, decayed_weight, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?)
-ON CONFLICT(from_id, to_id) DO UPDATE SET
-  manual_count = manual_count + excluded.manual_count,
-  radio_count = radio_count + excluded.radio_count,
-  finished_count = finished_count + excluded.finished_count,
-  partial_count = partial_count + excluded.partial_count,
-  skip_count = skip_count + excluded.skip_count,
+  skip_count, decayed_weight, updated_at, profile_id
+) VALUES (?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(profile_id,from_id, to_id) DO UPDATE SET
+  manual_count = transition_stats.manual_count + excluded.manual_count,
+  radio_count = transition_stats.radio_count + excluded.radio_count,
+  finished_count = transition_stats.finished_count + excluded.finished_count,
+  partial_count = transition_stats.partial_count + excluded.partial_count,
+  skip_count = transition_stats.skip_count + excluded.skip_count,
   decayed_weight = excluded.decayed_weight,
   updated_at = excluded.updated_at`,
-		fromID, toID, manual, radio, finished, partial, skip, decayed, nowStr)
+		fromID, toID, manual, radio, finished, partial, skip, decayed, nowStr, s.ProfileID)
 	return err
 }
 
 func (s *Store) LoadTransitionStatsFrom(fromID int64) (map[int64]float64, error) {
 	rows, err := s.DB.Query(`
-SELECT to_id, decayed_weight, updated_at FROM transition_stats WHERE from_id = ?`, fromID)
+SELECT to_id, decayed_weight, updated_at FROM transition_stats WHERE profile_id = ? AND from_id = ?`, s.ProfileID, fromID)
 	if err != nil {
 		return nil, err
 	}
@@ -125,61 +125,4 @@ SELECT to_id, decayed_weight, updated_at FROM transition_stats WHERE from_id = ?
 		}
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) RebuildTransitionStats() (int, error) {
-	if _, err := s.DB.Exec(`DELETE FROM transition_stats`); err != nil {
-		return 0, err
-	}
-	rows, err := s.DB.Query(`
-SELECT h.track_id, h.action, h.reason, COALESCE(h.source,''), h.ts, h.session_id,
-       COALESCE(i.outcome,''), COALESCE(i.source,'')
-FROM listening_history h
-LEFT JOIN recommendation_impressions i ON i.impression_id = h.impression_id
-WHERE h.action IN ('track_end','skip','finish')
-ORDER BY COALESCE(h.session_id,''), h.ts`)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	type ev struct {
-		trackID    int64
-		sessionID  string
-		outcome    string
-		provenance string
-	}
-	prev := map[string]int64{}
-	n := 0
-	for rows.Next() {
-		var trackID int64
-		var action, reason, source, ts, sessionID, outcome, impSource string
-		if err := rows.Scan(&trackID, &action, &reason, &source, &ts, &sessionID, &outcome, &impSource); err != nil {
-			return n, err
-		}
-		if outcome == "" {
-			if reason == "completed" || action == "finish" {
-				outcome = "finished"
-			} else if action == "skip" || reason == "skipped" {
-				outcome = "early_skip"
-			} else {
-				outcome = "partial"
-			}
-		}
-		provenance := "radio"
-		if source == "manual" || impSource == "manual" {
-			provenance = "manual"
-		}
-		if sessionID == "" {
-			sessionID = "_"
-		}
-		fromID := prev[sessionID]
-		if fromID != 0 && fromID != trackID {
-			if err := s.RecordOutcomeTransition(fromID, trackID, outcome, provenance); err != nil {
-				return n, err
-			}
-			n++
-		}
-		prev[sessionID] = trackID
-	}
-	return n, rows.Err()
 }

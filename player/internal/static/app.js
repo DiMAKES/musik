@@ -85,6 +85,214 @@ function albumKey(artist, album) {
 
 let authEnabled = false;
 let authReady = false;
+let multiUser = false;
+let account = null;
+
+function csrfHeaders() {
+  const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("musik_csrf="));
+  return cookie ? { "X-CSRF-Token": decodeURIComponent(cookie.slice("musik_csrf=".length)) } : {};
+}
+
+function renderAccount(me) {
+  multiUser = !!me.multi_user;
+  account = me.authenticated ? me : null;
+  const invitation = new URLSearchParams(location.search).get("invitation");
+  $("login-username").hidden = !multiUser;
+  $("login-username").required = multiUser;
+  $("login-password").autocomplete = invitation ? "new-password" : "current-password";
+  $("login-submit").textContent = multiUser && invitation ? "Создать аккаунт" : "Войти";
+  $("oidc-login").hidden = !multiUser || !me.oidc;
+  $("oidc-login").href = "/api/auth/oidc/default/start" + (invitation ? `?invitation=${encodeURIComponent(invitation)}` : "");
+  $("login-tagline").textContent = !multiUser ? "Введи пароль, чтобы открыть библиотеку"
+    : invitation ? "Придумай имя и пароль (от 8 символов)" : "Войди по имени и паролю";
+  $("account-box").hidden = !account;
+  $("profile-switch").hidden = !account;
+  const admin = !!account?.user?.roles?.includes("admin");
+  $("invitation-box").hidden = !admin;
+  $("settings-box").hidden = multiUser && !admin;
+  $("oidc-link").hidden = !multiUser || !account || !me.oidc;
+  $("password-form").hidden = !account?.local_account;
+  document.querySelector('[data-view="upload"]').hidden = multiUser && !admin;
+  if (admin) refreshAdminLists().catch((error) => toast(error.message));
+  if (!account) return;
+  refreshDeviceTokenProfiles();
+  refreshDeviceTokens().catch((error) => toast(error.message));
+  const identity = `${account.user.id}/${account.active_profile.id}`;
+  if (sessionStorage.getItem("musik_identity") !== identity) {
+    sessionStorage.removeItem("musik_session");
+    sessionId = null;
+    sessionStorage.setItem("musik_identity", identity);
+  }
+  document.querySelectorAll("[data-profile-switch]").forEach((select) => {
+    select.replaceChildren();
+    for (const profile of account.profiles) {
+      const option = document.createElement("option");
+      option.value = profile.id;
+      option.textContent = profile.name;
+      option.selected = profile.id === account.active_profile.id;
+      select.append(option);
+    }
+  });
+  $("account-display").textContent = account.user.display_name;
+  $("profile-active-name").value = account.active_profile.name;
+  $("profile-delete").disabled = account.profiles.length < 2;
+}
+
+function adminRow(label, detail) {
+  const row = document.createElement("div");
+  row.className = "admin-row";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const subtitle = document.createElement("span");
+  subtitle.textContent = detail;
+  row.append(title, subtitle);
+  return row;
+}
+
+function refreshDeviceTokenProfiles() {
+  const select = $("device-token-profile");
+  if (!select || !account) return;
+  select.replaceChildren();
+  for (const profile of account.profiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.is_default ? `${profile.name} · основной` : profile.name;
+    option.selected = profile.is_default;
+    select.append(option);
+  }
+}
+
+function deviceDate(value) {
+  if (!value) return "ещё не использовался";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function showDeviceTokenSecret(secret, qr) {
+  $("device-token-secret").value = secret;
+  // The server renders the QR (musik://connect with this token) as SVG.
+  $("device-token-qr").innerHTML = qr || "";
+  $("device-token-qr").hidden = !qr;
+  $("device-token-created").hidden = false;
+  $("device-token-created").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function deviceTokenRow(token) {
+  const row = adminRow(token.name || "Устройство", `Профиль: ${token.profile_name}\nСоздан: ${deviceDate(token.created_at)}\nПоследнее использование: ${deviceDate(token.last_used_at)}\nДействует до: ${deviceDate(token.expires_at)}${token.revoked_at ? `\nОтозван: ${deviceDate(token.revoked_at)}` : ""}`);
+  row.classList.add("device-token-row");
+  if (!token.revoked_at) {
+    const replace = document.createElement("button");
+    replace.className = "btn";
+    replace.type = "button";
+    replace.textContent = "Заменить";
+    replace.onclick = async () => {
+      if (!confirm(`Выпустить новый токен для «${token.name}»? Текущий перестанет работать.`)) return;
+      replace.disabled = true;
+      try {
+        const result = await api(`/api/account/device-tokens/${encodeURIComponent(token.id)}/replace`, { method: "POST", body: "{}" });
+        showDeviceTokenSecret(result.token, result.qr);
+        await refreshDeviceTokens();
+      } catch (error) { toast(error.message); }
+      finally { replace.disabled = false; }
+    };
+    const revoke = document.createElement("button");
+    revoke.className = "btn";
+    revoke.type = "button";
+    revoke.textContent = "Отозвать";
+    revoke.onclick = async () => {
+      if (!confirm(`Отозвать токен устройства «${token.name}»?`)) return;
+      revoke.disabled = true;
+      try {
+        await api(`/api/account/device-tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+        await refreshDeviceTokens();
+      } catch (error) { toast(error.message); }
+      finally { revoke.disabled = false; }
+    };
+    row.append(replace, revoke);
+  }
+  return row;
+}
+
+async function refreshDeviceTokens() {
+  if (!multiUser || !account) return;
+  const data = await api("/api/account/device-tokens");
+  const list = $("device-token-list");
+  list.replaceChildren();
+  for (const token of data.tokens || []) list.append(deviceTokenRow(token));
+  if (!list.childElementCount) {
+    const empty = document.createElement("p");
+    empty.className = "sub";
+    empty.textContent = "Пока нет выданных токенов.";
+    list.append(empty);
+  }
+}
+
+async function refreshAdminLists() {
+  if (!multiUser || !account?.user?.roles?.includes("admin")) return;
+  const [users, invitations] = await Promise.all([
+    api("/api/admin/users"),
+    api("/api/admin/invitations"),
+  ]);
+  const userList = $("admin-users");
+  userList.replaceChildren();
+  for (const user of users) {
+    const row = adminRow(user.display_name || "Пользователь", `${user.id} · профилей: ${user.profiles}`);
+    const status = document.createElement("select");
+    status.setAttribute("aria-label", `Статус ${user.display_name || user.id}`);
+    for (const [value, label] of [["active", "Активен"], ["disabled", "Отключён"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      status.append(option);
+    }
+    status.value = user.status;
+    const adminLabel = document.createElement("label");
+    const admin = document.createElement("input");
+    admin.type = "checkbox";
+    admin.checked = user.admin;
+    adminLabel.append(admin, document.createTextNode(" Администратор"));
+    const save = document.createElement("button");
+    save.className = "btn";
+    save.type = "button";
+    save.textContent = "Сохранить";
+    save.onclick = async () => {
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: status.value, admin: admin.checked }),
+        });
+        await ensureAuth();
+        await refreshAdminLists();
+        toast("Доступ обновлён");
+      } catch (error) { toast(error.message); }
+    };
+    row.append(status, adminLabel, save);
+    userList.append(row);
+  }
+  const inviteList = $("admin-invitations");
+  inviteList.replaceChildren();
+  for (const invitation of invitations) {
+    const pending = !invitation.consumed_at && !invitation.revoked_at && Date.parse(invitation.expires_at) > Date.now();
+    const state = invitation.consumed_at ? "Использовано" : invitation.revoked_at ? "Отозвано" : pending ? "Ожидает входа" : "Истекло";
+    const row = adminRow(invitation.email || "Без привязки к email", `${state} · до ${new Date(invitation.expires_at).toLocaleString()}`);
+    if (pending) {
+      const revoke = document.createElement("button");
+      revoke.className = "btn";
+      revoke.type = "button";
+      revoke.textContent = "Отозвать";
+      revoke.onclick = async () => {
+        try {
+          await api(`/api/admin/invitations/${encodeURIComponent(invitation.id)}`, { method: "DELETE" });
+          await refreshAdminLists();
+        } catch (error) { toast(error.message); }
+      };
+      row.append(revoke);
+    }
+    inviteList.append(row);
+  }
+  if (!users.length) userList.textContent = "Пользователей пока нет";
+  if (!invitations.length) inviteList.textContent = "Приглашений пока нет";
+}
 
 function showLogin(message) {
   const gate = $("login-gate");
@@ -110,7 +318,7 @@ function hideLogin() {
 }
 
 async function api(path, opts = {}) {
-  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const headers = { "Content-Type": "application/json", ...csrfHeaders(), ...(opts.headers || {}) };
   const res = await fetch(path, {
     credentials: "same-origin",
     ...opts,
@@ -140,6 +348,7 @@ async function api(path, opts = {}) {
 
 async function ensureAuth() {
   const me = await api("/api/auth/me");
+  renderAccount(me);
   authEnabled = !!me.auth_enabled;
   if (!authEnabled || me.ok) {
     hideLogin();
@@ -152,10 +361,12 @@ async function ensureAuth() {
 }
 
 async function doLogin(password) {
-  await api("/api/auth/login", {
+  const invitation = multiUser && new URLSearchParams(location.search).get("invitation");
+  await api(invitation ? "/api/auth/register" : "/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(multiUser ? { username: $("login-username").value, password, invitation } : { password }),
   });
+  if (multiUser) { location.replace("/"); return; }
   hideLogin();
   authReady = true;
   await bootApp();
@@ -164,6 +375,8 @@ async function doLogin(password) {
 async function doLogout() {
   await api("/api/auth/logout", { method: "POST", body: "{}" });
   setSession(null);
+  $("audio")?.pause();
+  if (multiUser) { sessionStorage.removeItem("musik_identity"); location.reload(); return; }
   if (authEnabled) {
     showLogin();
     authReady = false;
@@ -2200,7 +2413,7 @@ function splitListenAddr(addr) {
 
 async function loadSettings() {
   const box = $("settings-box");
-  if (!box) return;
+  if (!box || (multiUser && !account?.user?.roles?.includes("admin"))) return;
   try {
     settingsData = await api("/api/settings");
   } catch (e) {
@@ -2248,7 +2461,7 @@ function renderSettings() {
           <li><b>Cloudflare Tunnel</b>: даёт домен с HTTPS даже без белого IP. Адрес — <code>https://твой-домен</code>.</li>
           <li><b>Белый IP</b>: на роутере пробрось TCP-порт ${saved.port} на этот компьютер. Адрес — <code>http://&lt;внешний IP&gt;:${saved.port}</code>; лучше поставить перед сервером Caddy с HTTPS.</li>
         </ul>
-        <p>${s.phone?.auth_enabled ? "Пароль включён — без него в интернет выходить нельзя." : "<b>Сейчас сервер без пароля — в интернет так выходить нельзя.</b> Задай MUSIK_PASSWORD в .env."}
+        <p>${multiUser ? "Вход в аккаунт включён; для multi-user нужен HTTPS." : s.phone?.auth_enabled ? "Пароль включён — без него в интернет выходить нельзя." : "<b>Сейчас сервер без пароля — в интернет так выходить нельзя.</b> Задай MUSIK_PASSWORD в .env."}
           Работаешь по HTTPS — добавь в .env <code>MUSIK_SECURE_COOKIE=1</code>.</p>
       </div>
     </div>
@@ -2289,11 +2502,13 @@ function renderSettings() {
                <button type="button" class="tiny" id="settings-token-show">показать</button>
                <button type="button" class="tiny" id="settings-token-copy">копировать</button>
              </div>`
-          : phone.auth_enabled
+          : multiUser
+            ? `<p class="sub">Создай персональный токен и QR в разделе «Устройства и токены» выше. Он привязан к выбранному профилю.</p>`
+            : phone.auth_enabled
             ? `<p class="sub">API-токен не задан — в приложении входи по паролю.</p>`
             : `<p class="sub">Сервер работает без пароля: токен не нужен.</p>`
       }
-      <div class="settings-qr">
+      <div class="settings-qr" ${multiUser ? "hidden" : ""}>
         <h3>QR-код для приложения</h3>
         <div class="form-row">
           <select id="settings-qr-url"></select>
@@ -2678,9 +2893,6 @@ function tasteStatus(value) {
   }[value] || { title: "Твой вкус", chip: "—", lead: "" };
 }
 
-function maturityLabel(value) {
-  return tasteStatus(value).title;
-}
 
 function renderMonitor(p, week, rec) {
   const outcomes = rec.outcomes || week || {};
@@ -3552,6 +3764,7 @@ async function uploadMusicFiles(fileList) {
       const res = await fetch("/api/library/upload", {
         method: "POST",
         credentials: "same-origin",
+        headers: csrfHeaders(),
         body: fd,
       });
       if (res.status === 401) {
@@ -4865,7 +5078,7 @@ function wire() {
       const res = await fetch("/api/playlists/import?name=" + encodeURIComponent(file.name), {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": ct },
+        headers: { "Content-Type": ct, ...csrfHeaders() },
         body: text,
       });
       if (!res.ok) throw new Error((await res.json()).error || res.statusText);
@@ -4948,7 +5161,7 @@ function wire() {
 }
 
 async function bootApp() {
-  startBackgroundJobsMonitor();
+  if (!multiUser || account?.user?.roles?.includes("admin")) startBackgroundJobsMonitor();
   api("/api/profile")
     .then((p) => renderMaturity(p.maturity))
     .catch(console.error);
@@ -4968,6 +5181,85 @@ $("login-form").onsubmit = (e) => {
 };
 $("btn-logout").onclick = () => doLogout().catch((e) => toast(e.message || String(e)));
 $("btn-logout-profile").onclick = () => doLogout().catch((e) => toast(e.message || String(e)));
+$("password-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/account/password", { method: "POST", body: JSON.stringify({ current: $("password-current").value, new: $("password-new").value }) });
+    event.target.reset();
+    toast("Пароль изменён");
+  } catch (error) { toast(error.message); }
+};
+$("oidc-link").onclick = async () => {
+  try {
+    const result = await api("/api/auth/oidc/default/link", { method: "POST", body: "{}" });
+    location.assign(result.authorization_url);
+  } catch (error) { toast(error.message); }
+};
+
+function reloadProfile() {
+  $("audio")?.pause();
+  sessionStorage.removeItem("musik_session");
+  location.reload();
+}
+document.querySelectorAll("[data-profile-switch]").forEach((select) => select.onchange = async (event) => {
+  try { await api(`/api/profiles/${encodeURIComponent(event.target.value)}/activate`, { method: "POST", body: "{}" }); reloadProfile(); }
+  catch (error) { toast(error.message); await ensureAuth(); }
+});
+$("profile-create-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { await api("/api/profiles", { method: "POST", body: JSON.stringify({ name: $("profile-new-name").value }) }); $("profile-new-name").value = ""; await ensureAuth(); toast("Профиль создан"); }
+  catch (error) { toast(error.message); }
+};
+$("profile-rename-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { await api(`/api/profiles/${account.active_profile.id}`, { method: "PATCH", body: JSON.stringify({ name: $("profile-active-name").value }) }); await ensureAuth(); toast("Название сохранено"); }
+  catch (error) { toast(error.message); }
+};
+$("profile-delete").onclick = async () => {
+  if (!confirm(`Удалить профиль «${account.active_profile.name}»? Его данные будут сохранены в архиве.`)) return;
+  try { await api(`/api/profiles/${account.active_profile.id}`, { method: "DELETE" }); reloadProfile(); }
+  catch (error) { toast(error.message); }
+};
+$("device-token-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    const result = await api("/api/account/device-tokens", {
+      method: "POST",
+      body: JSON.stringify({ name: $("device-token-name").value, profile_id: $("device-token-profile").value }),
+    });
+    $("device-token-name").value = "";
+    showDeviceTokenSecret(result.token, result.qr);
+    await refreshDeviceTokens();
+  } catch (error) { toast(error.message); }
+};
+$("device-token-copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($("device-token-secret").value);
+    toast("Токен скопирован");
+  } catch (_) {
+    $("device-token-secret").select();
+    toast("Выдели токен и скопируй его вручную");
+  }
+};
+$("device-token-dismiss").onclick = () => {
+  $("device-token-secret").value = "";
+  $("device-token-qr").replaceChildren();
+  $("device-token-created").hidden = true;
+};
+$("invitation-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { const invite = await api("/api/admin/invitations", { method: "POST", body: JSON.stringify({ email: $("invitation-email").value, ttl_hours: Number($("invitation-hours").value) }) }); $("invitation-url").value = invite.url; $("invitation-result").hidden = false; }
+  catch (error) { toast(error.message); }
+};
+window.addEventListener("focus", async () => {
+  if (!multiUser || !account) return;
+  try {
+    const me = await api("/api/auth/me");
+    if (!me.authenticated || me.user.id !== account.user.id || me.active_profile.id !== account.active_profile.id) reloadProfile();
+    await refreshDeviceTokens();
+  }
+  catch (_) {}
+});
 
 ensureAuth()
   .then((ok) => {

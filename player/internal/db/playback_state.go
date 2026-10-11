@@ -6,8 +6,9 @@ import (
 	"time"
 )
 
-// PlaybackState is the last known "where am I listening" for the owner: the
-// session, track and position a reload or another device resumes from.
+// PlaybackState is the last known "where am I listening" for the profile: the
+// session, track and position a reload or another device of that profile
+// resumes from.
 type PlaybackState struct {
 	SessionID   string  `json:"session_id"`
 	TrackID     int64   `json:"track_id"`
@@ -23,7 +24,7 @@ func (s *Store) LoadPlaybackState() (PlaybackState, bool, error) {
 	var playing int
 	err := s.DB.QueryRow(`
 SELECT session_id, track_id, position_sec, listened_sec, playing, client_id, updated_at
-FROM playback_state WHERE owner_scope = 'local'`).Scan(
+FROM playback_state WHERE profile_id = ? AND owner_scope = 'local'`, s.ProfileID).Scan(
 		&st.SessionID, &st.TrackID, &st.PositionSec, &st.ListenedSec,
 		&playing, &st.ClientID, &st.UpdatedAt,
 	)
@@ -53,15 +54,15 @@ func (s *Store) SavePlaybackState(st PlaybackState, claim bool) (saved PlaybackS
 	}
 	res, err := s.DB.Exec(`
 INSERT INTO playback_state(
-  owner_scope, session_id, track_id, position_sec, listened_sec, playing, client_id, updated_at
-) VALUES ('local',?,?,?,?,?,?,?)
-ON CONFLICT(owner_scope) DO UPDATE SET
+  profile_id, owner_scope, session_id, track_id, position_sec, listened_sec, playing, client_id, updated_at
+) VALUES (?,'local',?,?,?,?,?,?,?)
+ON CONFLICT(profile_id, owner_scope) DO UPDATE SET
   session_id = excluded.session_id, track_id = excluded.track_id,
   position_sec = excluded.position_sec, listened_sec = excluded.listened_sec,
   playing = excluded.playing, client_id = excluded.client_id,
   updated_at = excluded.updated_at
 WHERE ? = 1 OR playback_state.client_id = excluded.client_id`,
-		st.SessionID, st.TrackID, st.PositionSec, st.ListenedSec, playing, st.ClientID, st.UpdatedAt,
+		s.ProfileID, st.SessionID, st.TrackID, st.PositionSec, st.ListenedSec, playing, st.ClientID, st.UpdatedAt,
 		claimed,
 	)
 	if err != nil {

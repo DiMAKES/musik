@@ -39,7 +39,7 @@
   <title>musik</title>
   <link rel="stylesheet" href="/fonts.css" />
   <link rel="stylesheet" href="/themes/base.css" />
-  <link rel="stylesheet" href="/style.css?v=retro24" />
+  <link rel="stylesheet" href="/style.css?v=074a1eed6f" />
   <script>
     (function () {
       try {
@@ -55,10 +55,13 @@
   <div id="login-gate" class="login-gate" hidden>
     <form id="login-form" class="login-card" autocomplete="current-password">
       <div class="brand"><img class="brand-logo" src="/icons/logo.png" alt="" width="34" height="34" decoding="async" />musik</div>
-      <p class="tagline">Введи пароль, чтобы открыть библиотеку</p>
+      <p class="tagline" id="login-tagline">Введи пароль, чтобы открыть библиотеку</p>
+      <label class="sr-only" for="login-username">Имя</label>
+      <input id="login-username" type="text" name="username" placeholder="Имя" autocomplete="username" autocapitalize="none" hidden />
       <label class="sr-only" for="login-password">Пароль</label>
       <input id="login-password" type="password" name="password" placeholder="Пароль" required autofocus />
       <button type="submit" class="btn primary" id="login-submit">Войти</button>
+      <a class="btn primary" id="oidc-login" href="/api/auth/oidc/default/start" hidden>Войти через аккаунт</a>
       <p class="login-error" id="login-error" hidden></p>
     </form>
   </div>
@@ -76,6 +79,7 @@
         <button type="button" class="tab" data-view="collections">Плейлисты</button>
         <button type="button" class="tab" data-view="profile">Профиль</button>
         <button type="button" class="tab" data-view="upload">Загрузка</button>
+        <select id="profile-switch" data-profile-switch aria-label="Активный профиль" hidden></select>
         <button type="button" class="tab logout-tab" id="btn-logout" title="Выйти из аккаунта" hidden>Выйти</button>
       </nav>
     </header>
@@ -374,6 +378,63 @@
       <section id="view-profile" class="view">
         <h1 class="page-title">Профиль</h1>
         <p class="sub">Как радио тебя знает и что ставит дальше</p>
+        <div class="panel" id="account-box" hidden>
+          <h2 id="account-display">Аккаунт</h2>
+          <label class="profile-switch-mobile">Активный профиль
+            <select id="profile-switch-mobile" data-profile-switch aria-label="Активный профиль"></select>
+          </label>
+          <p class="sub">У каждого профиля свои история, любимые треки, плейлисты и настройки радио.</p>
+          <button class="btn" type="button" id="oidc-link">Подключить ещё один OIDC-вход</button>
+          <form id="password-form" hidden>
+            <label>Текущий пароль <input id="password-current" type="password" autocomplete="current-password" required /></label>
+            <label>Новый пароль <input id="password-new" type="password" autocomplete="new-password" minlength="8" required /></label>
+            <button class="btn" type="submit">Сменить пароль</button>
+          </form>
+          <form id="profile-create-form">
+            <label>Новый профиль <input id="profile-new-name" maxlength="128" required /></label>
+            <button class="btn" type="submit">Создать профиль</button>
+          </form>
+          <form id="profile-rename-form">
+            <label>Название активного профиля <input id="profile-active-name" maxlength="128" required /></label>
+            <button class="btn" type="submit">Переименовать</button>
+            <button class="btn" type="button" id="profile-delete">Удалить профиль</button>
+          </form>
+          <section class="device-token-section" aria-labelledby="device-token-title">
+            <h2 id="device-token-title">Устройства и токены</h2>
+            <p class="sub">Токен действует 180 дней и привязан к выбранному профилю. Скопируй его в существующее поле токена мобильного приложения.</p>
+            <form id="device-token-form">
+              <label>Имя устройства <input id="device-token-name" maxlength="128" autocomplete="off" placeholder="Телефон" required /></label>
+              <label>Профиль <select id="device-token-profile" required></select></label>
+              <button class="btn" type="submit">Создать токен</button>
+            </form>
+            <div class="device-token-secret" id="device-token-created" hidden>
+              <strong>Скопируй токен сейчас</strong>
+              <p class="sub">Полный секрет больше не будет показан. Сохрани его в настройках мобильного приложения или отсканируй QR в приложении.</p>
+              <input id="device-token-secret" type="text" readonly autocomplete="off" spellcheck="false" aria-label="Новый секрет устройства" />
+              <div class="device-token-qr" id="device-token-qr" hidden></div>
+              <div class="device-token-actions">
+                <button class="btn" type="button" id="device-token-copy">Скопировать</button>
+                <button class="btn" type="button" id="device-token-dismiss">Готово</button>
+              </div>
+            </div>
+            <div id="device-token-list" class="admin-list" aria-live="polite"></div>
+          </section>
+        </div>
+        <div class="panel" id="invitation-box" hidden>
+          <h2>Пригласить пользователя</h2>
+          <form id="invitation-form">
+            <label>Email (необязательно) <input id="invitation-email" type="email" maxlength="254" /></label>
+            <label>Срок в часах <input id="invitation-hours" type="number" min="1" max="168" value="24" required /></label>
+            <button class="btn" type="submit">Создать приглашение</button>
+          </form>
+          <label id="invitation-result" hidden>Передайте эту ссылку пользователю. Она действует один раз.
+            <input id="invitation-url" type="text" readonly />
+          </label>
+          <h3>Пользователи</h3>
+          <div id="admin-users" class="admin-list" aria-live="polite"></div>
+          <h3>Приглашения</h3>
+          <div id="admin-invitations" class="admin-list" aria-live="polite"></div>
+        </div>
         <div id="settings-box" class="panel settings-panel"></div>
         <div class="panel" id="ui-box">
           <div class="panel-kicker">interface</div>
@@ -519,6 +580,10 @@
         <svg class="mnav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 11h16M4 16h10M4 20h10"/></svg>
         <span>Плейлисты</span>
       </button>
+      <button type="button" class="tab" data-view="profile" aria-label="Профиль">
+        <svg class="mnav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+        <span>Профиль</span>
+      </button>
     </nav>
   </div>
 
@@ -542,6 +607,6 @@
     </div>
   </div>
   <div id="toast" class="toast" hidden></div>
-  <script src="/app.js?v=retro27"></script>
+  <script src="/app.js?v=34659857a2"></script>
 </body>
 </html>

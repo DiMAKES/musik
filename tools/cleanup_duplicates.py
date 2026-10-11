@@ -169,10 +169,10 @@ def main(argv: list[str] | None = None) -> int:
                 freed += item.size
             conn.execute(
                 """
-                UPDATE tracks SET is_active = 0, is_duplicate_of = NULL, updated_at = ?
-                WHERE path = ? AND is_active = 1
+                UPDATE tracks SET is_active = 0, is_duplicate_of = NULL, updated_at = :now
+                WHERE path = :path AND is_active = 1
                 """,
-                (now, str(item.dup_path)),
+                {"now": now, "path": str(item.dup_path)},
             )
     print(f"\ndone: {deleted} file(s) removed, {freed / 1e6:.1f} MB freed, "
           f"{failed} failed, {len(items) - deleted - failed} flag(s) only")

@@ -31,6 +31,7 @@ type Server struct {
 	Static  http.FileSystem
 	HTTP    *http.Client
 	Auth    *auth.Gate
+	multi   *multiUserState
 
 	shareListeners int32
 	loginLimiter   *auth.LoginLimiter
@@ -52,7 +53,28 @@ var apiRoutes = []routeDescriptor{
 	{"GET", "/api/openapi.json", (*Server).handleOpenAPI},
 	{"GET", "/api/auth/me", (*Server).handleAuthMe},
 	{"POST", "/api/auth/login", (*Server).handleAuthLogin},
+	{"POST", "/api/auth/register", (*Server).handleLocalRegister},
+	{"POST", "/api/auth/token", (*Server).handleAuthToken},
+	{"POST", "/api/account/password", (*Server).handlePasswordChange},
 	{"POST", "/api/auth/logout", (*Server).handleAuthLogout},
+	{"GET", "/api/auth/oidc/default/start", (*Server).handleOIDCStart},
+	{"GET", "/api/auth/oidc/default/callback", (*Server).handleOIDCCallback},
+	{"POST", "/api/auth/oidc/default/link", (*Server).handleOIDCLinkStart},
+	{"GET", "/api/profiles", (*Server).handleProfiles},
+	{"POST", "/api/profiles", (*Server).handleProfileCreate},
+	{"PATCH", "/api/profiles/{profile_id}", (*Server).handleProfileRename},
+	{"DELETE", "/api/profiles/{profile_id}", (*Server).handleProfileDelete},
+	{"POST", "/api/profiles/{profile_id}/activate", (*Server).handleProfileActivate},
+	{"GET", "/api/account/device-tokens", (*Server).handleDeviceTokens},
+	{"POST", "/api/account/device-tokens", (*Server).handleDeviceTokenCreate},
+	{"DELETE", "/api/account/device-tokens/{id}", (*Server).handleDeviceTokenRevoke},
+	{"POST", "/api/account/device-tokens/{id}/replace", (*Server).handleDeviceTokenReplace},
+	{"POST", "/api/admin/invitations", (*Server).handleInvitationCreate},
+	{"GET", "/api/admin/invitations", (*Server).handleInvitations},
+	{"GET", "/api/admin/invitations/{id}", (*Server).handleInvitations},
+	{"DELETE", "/api/admin/invitations/{id}", (*Server).handleInvitationRevoke},
+	{"GET", "/api/admin/users", (*Server).handleAccounts},
+	{"PATCH", "/api/admin/users/{id}", (*Server).handleAccountUpdate},
 	{"GET", "/api/status", (*Server).handleStatus},
 	{"GET", "/api/profile", (*Server).handleProfile},
 	{"PUT", "/api/profile/explore", (*Server).handleExploreBounds},
@@ -147,6 +169,10 @@ var apiRoutes = []routeDescriptor{
 }
 
 func New(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile, staticFS http.FileSystem) *Server {
+	return newServer(cfg, store, idx, tp, staticFS, nil)
+}
+
+func newServer(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile, staticFS http.FileSystem, background chan func()) *Server {
 	var secret []byte
 	if cfg.SessionSecret != "" {
 		secret = []byte(cfg.SessionSecret)
@@ -176,7 +202,11 @@ func New(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile
 	s.Play.Flush = s.flushBackgroundIO
 	s.Play.Observe = func(op string, d time.Duration) { s.latency.Observe(op, d) }
 	s.Play.Warm = s.Media.Warm
-	go s.runBackgroundIO()
+	if background == nil {
+		go s.runBackgroundIO()
+	} else {
+		s.backgroundIO = background
+	}
 	return s
 }
 
@@ -203,12 +233,26 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, route := range apiRoutes {
 		mux.HandleFunc(route.method+" "+route.path, func(w http.ResponseWriter, r *http.Request) {
-			route.handler(s, w, r)
+			// A hot standby rejects every write; fail clearly instead of
+			// surfacing PostgreSQL's read-only transaction error as a 500.
+			if s.Store.ReadOnly && route.method != http.MethodGet {
+				w.Header().Set("Retry-After", "30")
+				writeErr(w, 503, "read_only_replica", "this server is a read-only replica")
+				return
+			}
+			server, err := s.requestServer(r)
+			if err != nil {
+				writeErr(w, 404, "profile_not_found", "profile not found")
+				return
+			}
+			route.handler(server, w, r)
 		})
 	}
 	mux.Handle("/", s.staticHandler())
 	var h http.Handler = mux
-	if s.Auth != nil {
+	if s.Cfg.MultiUser {
+		h = s.multiUserMiddleware(h)
+	} else if s.Auth != nil {
 		h = s.Auth.Middleware(h)
 	}
 	h = withGzip(h)

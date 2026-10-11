@@ -18,10 +18,8 @@ import (
 func testEngine(t *testing.T) *Engine {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "playback-test.db")
-	if err := testdb.Create(path); err != nil {
-		t.Fatal(err)
-	}
-	store, err := db.Open(path)
+	databaseURL, path := testdb.Target(t, path)
+	store, err := db.OpenDatabase(databaseURL, path)
 	if err != nil {
 		t.Fatal(err)
 	}

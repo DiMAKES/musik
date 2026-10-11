@@ -27,6 +27,15 @@ def test_fresh_migration_is_idempotent(tmp_path) -> None:
         ).fetchall()
     assert before == after
     assert _version(path) == LATEST_SCHEMA_VERSION
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(device_tokens)")}
+        assert columns == {
+            "id", "secret_hash", "user_id", "profile_id", "name", "created_at",
+            "last_used_at", "expires_at", "revoked_at",
+        }
+        assert conn.execute(
+            "SELECT value FROM installation_state WHERE key='active_admin_guard'"
+        ).fetchone() == ("1",)
 
 
 def test_legacy_database_reaches_same_schema_and_preserves_rows(tmp_path) -> None:
@@ -119,3 +128,149 @@ def test_foundation_schema_has_normalized_references_and_versioned_json(tmp_path
             conn.execute(
                 "UPDATE listening_history SET action='finish' WHERE event_id='event-1'"
             )
+
+
+def test_identity_schema_enforces_profile_and_oidc_ownership(tmp_path) -> None:
+    path = tmp_path / "identity.db"
+    migrate_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "INSERT INTO users(id, status, display_name, created_at, updated_at) "
+            "VALUES ('user-a', 'active', 'A', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO users(id, status, display_name, created_at, updated_at) "
+            "VALUES ('user-b', 'active', 'B', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO profiles(id, owner_user_id, name, is_default, created_at, updated_at) "
+            "VALUES ('profile-a', 'user-a', 'Main', 1, 'now', 'now')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO profiles(id, owner_user_id, name, is_default, created_at, updated_at) "
+                "VALUES ('profile-a2', 'user-a', 'Other', 1, 'now', 'now')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO profiles(id, owner_user_id, name, is_default, created_at, updated_at) "
+                "VALUES ('orphan', 'missing', 'Orphan', 0, 'now', 'now')"
+            )
+        conn.execute(
+            "INSERT INTO external_identities(issuer, subject, user_id, created_at) "
+            "VALUES ('https://issuer.test', 'subject-1', 'user-a', 'now')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO external_identities(issuer, subject, user_id, created_at) "
+                "VALUES ('https://issuer.test', 'subject-1', 'user-b', 'now')"
+            )
+        conn.execute(
+            "INSERT INTO external_identities(issuer, subject, user_id, created_at) "
+            "VALUES ('https://other.test', 'subject-1', 'user-b', 'now')"
+        )
+
+
+def test_profile_migration_scopes_unique_event_keys_per_profile(tmp_path) -> None:
+    path = tmp_path / "profile-unique.db"
+    migrate_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        legacy_profile = conn.execute(
+            "SELECT value FROM installation_state WHERE key='legacy_profile_id'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO users(id,status,display_name,created_at,updated_at) "
+            "VALUES ('user-b','active','B','now','now')"
+        )
+        conn.execute(
+            "INSERT INTO profiles(id,owner_user_id,name,is_default,created_at,updated_at) "
+            "VALUES ('profile-b','user-b','Main',1,'now','now')"
+        )
+        conn.execute("INSERT INTO tracks(path,created_at,updated_at) VALUES ('/a.flac','now','now')")
+        track_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for profile in (legacy_profile, "profile-b"):
+            conn.execute(
+                """INSERT INTO listening_history(
+                       profile_id,track_id,ts,action,event_id,event_schema_version
+                   ) VALUES (?,?,'now','track_start','same-client-event',1)""",
+                (profile, track_id),
+            )
+        assert conn.execute(
+            "SELECT count(*) FROM listening_history WHERE event_id='same-client-event'"
+        ).fetchone()[0] == 2
+
+
+def test_upstream_schema_10_upgrade_preserves_catalog_and_personal_data(tmp_path):
+    from musik.db.migrations import MIGRATIONS
+
+    path = tmp_path / "upstream-10.db"
+    with sqlite3.connect(path) as conn:
+        for migration in MIGRATIONS:
+            if migration.version > 10:
+                break
+            migration.apply(conn)
+            conn.execute(f"PRAGMA user_version = {migration.version}")
+            conn.commit()
+        conn.execute(
+            """INSERT INTO tracks(id,path,title,artist,artist_segments,album_artist,
+               is_compilation,is_remaster,created_at,updated_at)
+               VALUES(1,'/music/upstream.flac','Preserved','A / B','["A","B"]',
+               'Various Artists',1,1,'now','now')"""
+        )
+        conn.execute("INSERT INTO listening_history(track_id,ts,action,weekday) VALUES(1,'now','finish',0)")
+        conn.execute("INSERT INTO playback_state(owner_scope,track_id,position_sec,updated_at) VALUES('local',1,42,'now')")
+
+    assert migrate_db(path) == LATEST_SCHEMA_VERSION
+    assert migrate_db(path) == LATEST_SCHEMA_VERSION
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT title,artist_segments,album_artist,is_compilation,is_remaster FROM tracks WHERE id=1").fetchone() == (
+            'Preserved', '["A","B"]', 'Various Artists', 1, 1,
+        )
+        profile = conn.execute("SELECT value FROM installation_state WHERE key='legacy_profile_id'").fetchone()[0]
+        assert conn.execute("SELECT profile_id,weekday FROM listening_history WHERE track_id=1").fetchone() == (profile, 0)
+        assert conn.execute("SELECT profile_id,owner_scope,track_id,position_sec FROM playback_state").fetchone() == (profile, "local", 1, 42)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == f"musik_{LATEST_SCHEMA_VERSION}"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_interrupted_playback_ownership_rolls_back_and_retries(tmp_path):
+    from musik.db.migrations import MIGRATIONS, _profile_ownership
+
+    class InterruptedConnection(sqlite3.Connection):
+        interrupt = True
+
+        def check_interruption(self, sql):
+            if self.interrupt and "CREATE TABLE playback_state_by_profile" in sql:
+                self.interrupt = False
+                raise RuntimeError("interrupted playback ownership")
+
+        def execute(self, sql, *args, **kwargs):
+            self.check_interruption(sql)
+            return super().execute(sql, *args, **kwargs)
+
+        def executescript(self, sql):
+            self.check_interruption(sql)
+            return super().executescript(sql)
+
+    path = tmp_path / "interrupted.db"
+    with sqlite3.connect(path, factory=InterruptedConnection) as conn:
+        for migration in MIGRATIONS:
+            if migration.version > 11:
+                break
+            migration.apply(conn)
+            conn.execute(f"PRAGMA user_version = {migration.version}")
+            conn.commit()
+        conn.execute("INSERT INTO playback_state(owner_scope,position_sec,updated_at) VALUES('local',42,'now')")
+        conn.commit()
+        with pytest.raises(RuntimeError, match="interrupted playback ownership"):
+            _profile_ownership(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
+        assert "profile_id" not in {r[1] for r in conn.execute("PRAGMA table_info(listening_history)")}
+        assert conn.execute("SELECT position_sec FROM playback_state").fetchone() == (42,)
+        _profile_ownership(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert conn.execute("SELECT profile_id,position_sec FROM playback_state").fetchone()[1] == 42
+    assert migrate_db(path) == LATEST_SCHEMA_VERSION

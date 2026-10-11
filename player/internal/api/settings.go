@@ -14,10 +14,11 @@ import (
 )
 
 // settingsAllowed: with auth enabled the gate already let only the owner
-// through; in open mode (MUSIK_AUTH_DISABLED) anyone on the LAN would reach
-// these endpoints, so they are limited to this computer.
+// through, and in multi-user mode the middleware admits administrators only
+// (never device tokens). In open mode (MUSIK_AUTH_DISABLED) anyone on the LAN
+// would reach these endpoints, so they are limited to this computer.
 func (s *Server) settingsAllowed(w http.ResponseWriter, r *http.Request) bool {
-	if s.Cfg.AuthEnabled() || isLoopback(r) {
+	if s.Cfg.MultiUser || s.Cfg.AuthEnabled() || isLoopback(r) {
 		return true
 	}
 	writeErr(w, 403, "local_only", "без пароля настройки доступны только с этого компьютера")

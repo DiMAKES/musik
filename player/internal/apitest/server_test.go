@@ -21,10 +21,8 @@ func openTestServer(t *testing.T) *api.Server {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "db", "musik-api-test.db")
-	if err := testdb.Create(path); err != nil {
-		t.Fatal(err)
-	}
-	store, err := db.Open(path)
+	databaseURL, path := testdb.Target(t, path)
+	store, err := db.OpenDatabase(databaseURL, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,5 +97,27 @@ func loadIndex(t *testing.T, server *api.Server, rows []db.TrackRow) {
 	}
 	if server.Builder != nil {
 		server.Builder.Idx = idx
+	}
+}
+
+// seedPlaylist stores a generated daily playlist for the server profile.
+func seedPlaylist(t *testing.T, server *api.Server, createdAt string, trackIDs ...int64) {
+	t.Helper()
+	profile := server.Store.ProfileID
+	var playlistID int64
+	if err := server.Store.DB.QueryRow(
+		`INSERT INTO playlists(kind, name, created_at, profile_id) VALUES ('daily', 'Daily', ?, ?) RETURNING id`,
+		createdAt, profile,
+	).Scan(&playlistID); err != nil {
+		t.Fatal(err)
+	}
+	for position, trackID := range trackIDs {
+		if _, err := server.Store.DB.Exec(
+			`INSERT INTO playlist_tracks(item_id, playlist_id, position, track_id, explanation, added_at, profile_id)
+VALUES (?, ?, ?, ?, '', ?, ?)`,
+			db.NewID(), playlistID, position, trackID, createdAt, profile,
+		); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

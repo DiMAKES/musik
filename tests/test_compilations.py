@@ -60,13 +60,15 @@ def test_m4a_compilation_flag_comes_from_cpil(tmp_path: Path) -> None:
     assert tags.album_artist is None
 
 
-def test_scan_refreshes_tags_of_unchanged_files_once(tmp_path: Path, monkeypatch) -> None:
+def test_scan_refreshes_tags_of_unchanged_files_once(
+    tmp_path: Path, monkeypatch, test_database
+) -> None:
     lib = tmp_path / "lib"
     lib.mkdir()
     monkeypatch.setenv("MUSIK_LIBRARY", str(lib))
     monkeypatch.setenv("MUSIK_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MUSIK_ARTWORK_CACHE", str(tmp_path / "data" / "cache" / "artwork"))
-    monkeypatch.setenv("MUSIK_DB_PATH", str(tmp_path / "data" / "db" / "t.db"))
+    test_database(tmp_path / "data" / "db" / "t.db")
     get_settings.cache_clear()
     ensure_db()
     path = _flac(

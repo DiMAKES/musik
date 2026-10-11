@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,23 +30,34 @@ type Service struct {
 	Taste *taste.Profile
 	Play  *playback.Engine
 	HTTP  *http.Client
+	// Catalog is the process-wide catalog every runtime's index attaches to.
+	Catalog *index.CatalogSource
+	// ProfileRuntime marks a per-profile runtime. It attaches to the catalog
+	// the installation runtime refreshed and writes no shared derivatives.
+	ProfileRuntime bool
 }
 
 func New(cfg config.Config, store *db.Store, idx *index.Index, tp *taste.Profile, play *playback.Engine, client *http.Client) *Service {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Service{Cfg: cfg, Store: store, Idx: idx, Taste: tp, Play: play, HTTP: client}
+	return &Service{Cfg: cfg, Store: store, Idx: idx, Taste: tp, Play: play, HTTP: client, Catalog: index.NewCatalogSource(store)}
 }
 
 func (s *Service) Reload() error {
-	rows, err := s.Store.LoadReadyTracks()
+	refresh := s.Catalog.Refresh
+	if s.ProfileRuntime {
+		refresh = s.Catalog.Current
+	}
+	cat, err := refresh()
 	if err != nil {
 		return err
 	}
-	if err := s.Idx.Load(rows); err != nil {
+	stats, err := s.Store.LoadTrackStats()
+	if err != nil {
 		return err
 	}
+	s.Idx.Attach(cat, stats)
 	pos, neg, _ := s.Store.ListenSignalCounts()
 	if blob, err := s.Store.LatestProfile("global"); err == nil && len(blob) > 0 {
 		v := index.BytesToFloat32(blob)
@@ -61,6 +73,9 @@ func (s *Service) Reload() error {
 		s.Taste.Maturity(s.Cfg.ProfileFormingAt, s.Cfg.ProfileReadyAt))
 	s.Play.ReloadTransitions()
 	s.Play.ReloadRanker()
+	if s.Store.ReadOnly || s.ProfileRuntime {
+		return nil
+	}
 	entityRows := s.Idx.EntityVectorRows(db.EntityModelVersion)
 	go func() {
 		if err := s.Store.ReplaceEntityVectors(db.EntityModelVersion, entityRows); err != nil {
@@ -111,12 +126,25 @@ func (s *Service) EnsureWorker() {
 		cmd = exec.Command(python, "-m", "musik", "worker")
 	}
 	cmd.Dir = projectRoot
-	cmd.Env = append(os.Environ(),
+	cmd.Env = make([]string, 0, len(os.Environ())+10)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "MUSIK_DB_PATH=") || strings.HasPrefix(entry, "MUSIK_DATABASE_URL=") ||
+			strings.HasPrefix(entry, "MUSIK_MULTI_USER=") || strings.HasPrefix(entry, "MUSIK_API_TOKEN=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env,
 		"MUSIK_ROOT="+projectRoot,
-		"MUSIK_DB_PATH="+s.Cfg.DBPath,
+		"MUSIK_MULTI_USER="+strconv.FormatBool(s.Cfg.MultiUser),
 		"MUSIK_LIBRARY="+s.Cfg.Library,
 		"MUSIK_PLAYER_RELOAD_URL=http://127.0.0.1"+normalizeAddr(s.Cfg.Addr)+"/api/reload",
 	)
+	if s.Cfg.DatabaseURL != "" {
+		cmd.Env = append(cmd.Env, "MUSIK_DATABASE_URL="+s.Cfg.DatabaseURL)
+	} else {
+		cmd.Env = append(cmd.Env, "MUSIK_DB_PATH="+s.Cfg.DBPath)
+	}
 	if s.Cfg.APIToken != "" {
 		cmd.Env = append(cmd.Env, "MUSIK_API_TOKEN="+s.Cfg.APIToken)
 	}
@@ -143,7 +171,10 @@ func (s *Service) EnsureWorker() {
 	log.Printf("worker autostart: still not healthy at %s (check %s)", s.Cfg.WorkerURL, logPath)
 }
 
-func (s *Service) WatchJobs() {
+func (s *Service) WatchJobs(reload func() error) {
+	if reload == nil {
+		reload = s.Reload
+	}
 	after := time.Now().UTC().Format(time.RFC3339Nano)
 	ticker := time.NewTicker(3 * time.Second)
 	go func() {
@@ -161,7 +192,7 @@ func (s *Service) WatchJobs() {
 				}
 			}
 			if needReload {
-				if err := s.Reload(); err != nil {
+				if err := reload(); err != nil {
 					log.Printf("auto-reload after job: %v", err)
 				}
 			}

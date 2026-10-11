@@ -253,6 +253,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	mat := s.Play.Maturity()
 	explore := s.Play.Explore()
 	sessionCount := s.Play.SessionCount()
+	dbBackend := s.Store.Dialect
+	if dbBackend == "postgres" {
+		dbBackend = "postgresql"
+	}
 	out := map[string]any{
 		"tracks": s.Idx.Size(), "dim": s.Idx.Dim(),
 		"taste_ready":      s.Taste.Ready(),
@@ -262,7 +266,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"explore_lo":       s.exploreState()["explore_lo"],
 		"explore_hi":       s.exploreState()["explore_hi"],
 		"model_version":    s.Play.Ranker.ModelVersion,
-		"db":               s.Cfg.DBPath,
+		"db_backend":       dbBackend,
 		"worker_url":       s.Cfg.WorkerURL,
 		"worker_autostart": s.Cfg.WorkerAutostart,
 	}

@@ -14,5 +14,5 @@ def test_go_fixture_matches_migrations() -> None:
     spec.loader.exec_module(module)
     assert module.FIXTURE.read_text(encoding="utf-8") == module.generate(), (
         "player/internal/testdb/schema.sql is stale; run "
-        "`python scripts/go_test_schema.py --write`"
+        "`uv run python scripts/go_test_schema.py --write`"
     )

@@ -1,19 +1,20 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
 func (s *Store) EnqueueJob(kind, payloadJSON string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.DB.Exec(`
+	var id int64
+	err := s.DB.QueryRow(`
 INSERT INTO jobs(kind, status, payload_json, created_at, updated_at)
-VALUES (?,'pending',?,?,?)`, kind, nullStr(payloadJSON), now, now)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+VALUES (?, 'pending', ?, ?, ?)
+RETURNING id`, kind, nullStr(payloadJSON), now, now).Scan(&id)
+	return id, err
 }
 
 type Job struct {
@@ -27,80 +28,71 @@ type Job struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+func mapJob(row JobRecord) Job {
+	job := Job{ID: row.ID, Kind: row.Kind, Status: row.Status, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	if row.PayloadJSON != nil {
+		job.Payload = *row.PayloadJSON
+	}
+	if row.ResultJSON != nil {
+		job.Result = *row.ResultJSON
+	}
+	if row.Error != nil {
+		job.Error = *row.Error
+	}
+	return job
+}
+
+func mapJobs(rows []JobRecord) []Job {
+	out := make([]Job, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapJob(row))
+	}
+	return out
+}
+
 // ListDoneJobsAfter returns jobs completed after the given RFC3339/Nano timestamp
 // (exclusive). Used by the player to auto-reload after worker finishes.
 func (s *Store) ListDoneJobsAfter(after string, limit int) ([]Job, error) {
 	if limit < 1 {
 		limit = 20
 	}
-	rows, err := s.DB.Query(`
-SELECT id, kind, status, COALESCE(payload_json,''), COALESCE(result_json,''),
-       COALESCE(error,''), created_at, updated_at
-FROM jobs
-WHERE status = 'done' AND updated_at > ?
-ORDER BY updated_at ASC
-LIMIT ?`, after, limit)
-	if err != nil {
+	var rows []JobRecord
+	if err := s.DB.Select(context.Background(), &rows,
+		`SELECT `+jobColumns+` FROM jobs WHERE status = 'done' AND updated_at > ? ORDER BY updated_at ASC LIMIT ?`,
+		after, limit); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Job
-	for rows.Next() {
-		var j Job
-		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &j.Payload, &j.Result, &j.Error, &j.CreatedAt, &j.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, j)
-	}
-	return out, rows.Err()
+	return mapJobs(rows), nil
 }
 
 func (s *Store) ListJobs(status string, limit int) ([]Job, error) {
 	if limit < 1 {
 		limit = 50
 	}
-	var rows *sql.Rows
-	var err error
+	query := `SELECT ` + jobColumns + ` FROM jobs`
+	var args []any
 	if status != "" {
-		rows, err = s.DB.Query(`
-SELECT id, kind, status, COALESCE(payload_json,''), COALESCE(result_json,''),
-       COALESCE(error,''), created_at, updated_at
-FROM jobs WHERE status = ? ORDER BY id DESC LIMIT ?`, status, limit)
-	} else {
-		rows, err = s.DB.Query(`
-SELECT id, kind, status, COALESCE(payload_json,''), COALESCE(result_json,''),
-       COALESCE(error,''), created_at, updated_at
-FROM jobs ORDER BY id DESC LIMIT ?`, limit)
+		query += ` WHERE status = ?`
+		args = append(args, status)
 	}
-	if err != nil {
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	var rows []JobRecord
+	if err := s.DB.Select(context.Background(), &rows, query, args...); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Job
-	for rows.Next() {
-		var j Job
-		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &j.Payload, &j.Result, &j.Error, &j.CreatedAt, &j.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, j)
-	}
-	return out, rows.Err()
+	return mapJobs(rows), nil
 }
 
 func (s *Store) GetJob(id int64) (*Job, error) {
-	var j Job
-	var payload, result, errStr sql.NullString
-	err := s.DB.QueryRow(`
-SELECT id, kind, status, payload_json, result_json, error, created_at, updated_at
-FROM jobs WHERE id = ?`, id).Scan(&j.ID, &j.Kind, &j.Status, &payload, &result, &errStr, &j.CreatedAt, &j.UpdatedAt)
-	if err == sql.ErrNoRows {
+	var row JobRecord
+	err := s.DB.Get(context.Background(), &row, `SELECT `+jobColumns+` FROM jobs WHERE id = ?`, id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	j.Payload = payload.String
-	j.Result = result.String
-	j.Error = errStr.String
-	return &j, nil
+	job := mapJob(row)
+	return &job, nil
 }

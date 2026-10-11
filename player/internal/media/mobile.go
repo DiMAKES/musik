@@ -27,8 +27,8 @@ type mobileFlight struct {
 	wait map[int64]*flightEntry
 }
 
-// Every media.Service shares one cache directory, so de-duplication and the
-// ffmpeg budget are process-wide.
+// Every profile runtime has its own media.Service but they share one cache
+// directory, so de-duplication and the ffmpeg budget are process-wide.
 var (
 	sharedMobileFlight mobileFlight
 	transcodeSlots     = make(chan struct{}, max(2, runtime.NumCPU()/2))
@@ -222,8 +222,9 @@ func (s *Service) transcodeMobile(src, dst, format string) error {
 }
 
 // streamWarm keeps prepared mobile audio for the current and next tracks in
-// memory. One cache serves the whole process and is bounded by total size,
-// not by entry count, so memory stays predictable for long tracks.
+// memory. One cache serves every profile runtime (track bytes are not
+// personal); it is bounded by total size so memory does not grow with the
+// number of open profiles.
 type streamWarm struct {
 	mu       sync.Mutex
 	maxBytes int

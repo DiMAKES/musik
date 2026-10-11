@@ -8,8 +8,8 @@ import (
 // LoadTransitionGraph loads from→to weights (min weight 1).
 func (s *Store) LoadTransitionGraph() (map[int64]map[int64]float64, error) {
 	rows, err := s.DB.Query(`
-SELECT from_id, to_id, weight FROM transitions WHERE weight >= 1
-ORDER BY weight DESC LIMIT 50000`)
+SELECT from_id, to_id, weight FROM transitions WHERE profile_id = ? AND weight >= 1
+ORDER BY weight DESC LIMIT 50000`, s.ProfileID)
 	if err != nil {
 		return nil, err
 	}
@@ -55,8 +55,8 @@ INSERT INTO play_sessions(
   id, mode, current_id, queue_json, exclude_json, rated_json,
   daily_ids_json, daily_pos, playlist_name, playlist_kind, current_item_json,
   taste_state_schema_version, taste_state_json, active_contexts_json,
-  transition_profile, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)
+  transition_profile, updated_at, profile_id
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   mode=excluded.mode,
   current_id=excluded.current_id,
@@ -72,7 +72,7 @@ ON CONFLICT(id) DO UPDATE SET
   taste_state_json=excluded.taste_state_json,
   active_contexts_json=excluded.active_contexts_json,
   transition_profile=excluded.transition_profile,
-  updated_at=excluded.updated_at`,
+  updated_at=excluded.updated_at WHERE play_sessions.profile_id = excluded.profile_id`,
 		row.ID, row.Mode, row.CurrentID, nullStr(row.QueueJSON), nullStr(row.ExcludeJSON),
 		nullStr(row.RatedJSON), nullStr(row.DailyIDsJSON), row.DailyPos,
 		row.PlaylistName, row.PlaylistKind, nullStr(row.CurrentItemJSON),
@@ -82,7 +82,7 @@ ON CONFLICT(id) DO UPDATE SET
 				return "smooth"
 			}
 			return row.TransitionProfile
-		}(), row.UpdatedAt)
+		}(), row.UpdatedAt, s.ProfileID)
 	return err
 }
 
@@ -95,7 +95,7 @@ SELECT id, mode, current_id, queue_json, exclude_json, rated_json,
        daily_ids_json, daily_pos, playlist_name, playlist_kind,
        current_item_json, taste_state_json, active_contexts_json,
        transition_profile, updated_at
-FROM play_sessions WHERE id = ?`, id).Scan(
+FROM play_sessions WHERE profile_id = ? AND id = ?`, s.ProfileID, id).Scan(
 		&row.ID, &row.Mode, &row.CurrentID, &q, &ex, &rated, &daily,
 		&row.DailyPos, &row.PlaylistName, &row.PlaylistKind, &currentItem,
 		&tasteState, &contexts, &profile, &row.UpdatedAt)
@@ -133,34 +133,23 @@ FROM play_sessions WHERE id = ?`, id).Scan(
 }
 
 func (s *Store) DeletePlaySession(id string) error {
-	_, err := s.DB.Exec(`DELETE FROM play_sessions WHERE id = ?`, id)
+	_, err := s.DB.Exec(`DELETE FROM play_sessions WHERE profile_id = ? AND id = ?`, s.ProfileID, id)
 	return err
 }
 
 func (s *Store) DeleteStalePlaySessions(olderThan time.Time) error {
-	_, err := s.DB.Exec(`DELETE FROM play_sessions WHERE updated_at < ?`, olderThan.UTC().Format(time.RFC3339Nano))
+	_, err := s.DB.Exec(`DELETE FROM play_sessions WHERE profile_id = ? AND updated_at < ?`, s.ProfileID, olderThan.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
 func (s *Store) CountPlaySessions() (int, error) {
 	var n int
-	err := s.DB.QueryRow(`SELECT COUNT(*) FROM play_sessions`).Scan(&n)
+	err := s.DB.QueryRow(`SELECT COUNT(*) FROM play_sessions WHERE profile_id = ?`, s.ProfileID).Scan(&n)
 	return n, err
 }
 
 func (s *Store) OldestPlaySessionIDs(limit int) ([]string, error) {
-	rows, err := s.DB.Query(`SELECT id FROM play_sessions ORDER BY updated_at ASC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return QueryAll(s.DB, func(rows *sql.Rows, id *string) error {
+		return rows.Scan(id)
+	}, `SELECT id FROM play_sessions WHERE profile_id = ? ORDER BY updated_at ASC LIMIT ?`, s.ProfileID, limit)
 }

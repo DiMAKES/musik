@@ -2,6 +2,11 @@
 -- Do not edit by hand.
 PRAGMA foreign_keys = OFF;
 BEGIN TRANSACTION;
+CREATE TABLE alembic_version (
+	version_num VARCHAR(32) NOT NULL,
+	CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);
+INSERT INTO "alembic_version" VALUES('musik_14');
 CREATE TABLE artist_photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name_key TEXT NOT NULL UNIQUE,
@@ -16,23 +21,45 @@ CREATE TABLE artwork_lookups (
             status TEXT NOT NULL,
             checked_at TEXT NOT NULL
         );
-CREATE TABLE custom_tags (
-    tag_id      TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    archived_at TEXT,
-    owner_scope TEXT NOT NULL DEFAULT 'local'
+CREATE TABLE auth_sessions (
+    token_hash        TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    active_profile_id TEXT NOT NULL,
+    csrf_hash         TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    expires_at        TEXT NOT NULL,
+    revoked_at        TEXT,
+    FOREIGN KEY (active_profile_id, user_id)
+        REFERENCES profiles(id, owner_user_id)
 );
-CREATE TABLE discover_tips (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,
-    artist TEXT,
-    album TEXT,
-    score REAL NOT NULL DEFAULT 0,
-    track_ids_json TEXT NOT NULL,
-    explanation TEXT,
-    created_at TEXT NOT NULL
-);
+CREATE TABLE "custom_tags" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+tag_id      TEXT PRIMARY KEY,
+name        TEXT NOT NULL,
+created_at  TEXT NOT NULL,
+archived_at TEXT,
+owner_scope TEXT NOT NULL DEFAULT 'local',
+UNIQUE(profile_id,tag_id));
+CREATE TABLE device_tokens (
+            id          TEXT PRIMARY KEY,
+            secret_hash TEXT NOT NULL UNIQUE,
+            user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            profile_id  TEXT NOT NULL REFERENCES profiles(id),
+            name        TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            last_used_at TEXT,
+            expires_at  TEXT NOT NULL,
+            revoked_at  TEXT
+        );
+CREATE TABLE "discover_tips" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+kind TEXT NOT NULL,
+artist TEXT,
+album TEXT,
+score REAL NOT NULL DEFAULT 0,
+track_ids_json TEXT NOT NULL,
+explanation TEXT,
+created_at TEXT NOT NULL,
+UNIQUE(profile_id,id));
 CREATE TABLE entity_vectors (
     entity_type      TEXT NOT NULL
         CHECK (entity_type IN ('artist', 'album', 'genre', 'custom_collection')),
@@ -44,45 +71,57 @@ CREATE TABLE entity_vectors (
     computed_at      TEXT NOT NULL,
     PRIMARY KEY (entity_type, entity_key, model_version)
 );
-CREATE TABLE event_contexts (
-               history_id INTEGER NOT NULL REFERENCES listening_history(id) ON DELETE CASCADE,
-               context_id TEXT NOT NULL REFERENCES taste_contexts(context_id),
-               PRIMARY KEY (history_id, context_id)
-           );
-CREATE TABLE explore_arms (
-            arm_key       TEXT PRIMARY KEY,
-            arm_kind      TEXT NOT NULL CHECK (arm_kind IN ('aggregate', 'source')),
-            alpha         REAL NOT NULL CHECK (alpha > 0),
-            beta          REAL NOT NULL CHECK (beta > 0),
-            successes     INTEGER NOT NULL DEFAULT 0 CHECK (successes >= 0),
-            failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
-            last_decay_at TEXT,
-            updated_at    TEXT NOT NULL,
-            owner_scope   TEXT NOT NULL DEFAULT 'local'
-        );
-CREATE TABLE favorite_albums (
-    artist TEXT NOT NULL,
-    album TEXT NOT NULL,
-    added_at TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (artist, album)
+CREATE TABLE "event_contexts" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+history_id INTEGER NOT NULL ,
+context_id TEXT NOT NULL ,
+PRIMARY KEY(profile_id,history_id,context_id),
+CHECK(history_id IS NOT NULL AND context_id IS NOT NULL),
+FOREIGN KEY(profile_id,history_id) REFERENCES listening_history(profile_id,id) ON DELETE CASCADE,
+FOREIGN KEY(profile_id,context_id) REFERENCES taste_contexts(profile_id,context_id));
+CREATE TABLE "explore_arms" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+arm_key       TEXT ,
+arm_kind      TEXT NOT NULL CHECK (arm_kind IN ('aggregate', 'source')),
+alpha         REAL NOT NULL CHECK (alpha > 0),
+beta          REAL NOT NULL CHECK (beta > 0),
+successes     INTEGER NOT NULL DEFAULT 0 CHECK (successes >= 0),
+failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+last_decay_at TEXT,
+updated_at    TEXT NOT NULL,
+owner_scope   TEXT NOT NULL DEFAULT 'local',
+PRIMARY KEY(profile_id,arm_key),
+CHECK(arm_key IS NOT NULL));
+CREATE TABLE external_identities (
+    issuer     TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL, password_hash TEXT,
+    PRIMARY KEY (issuer, subject)
 );
-CREATE TABLE favorite_artists (
-    artist TEXT PRIMARY KEY,
-    added_at TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE favorites (
-    track_id INTEGER PRIMARY KEY,
-    added_at TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE feature_weights (
-    week_key TEXT NOT NULL,
-    dim      INTEGER NOT NULL,
-    weight   REAL NOT NULL,
-    PRIMARY KEY (week_key, dim)
-);
+CREATE TABLE "favorite_albums" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+artist TEXT NOT NULL,
+album TEXT NOT NULL,
+added_at TEXT NOT NULL,
+position INTEGER NOT NULL DEFAULT 0,
+PRIMARY KEY(profile_id,artist,album),
+CHECK(artist IS NOT NULL AND album IS NOT NULL));
+CREATE TABLE "favorite_artists" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+artist TEXT ,
+added_at TEXT NOT NULL,
+position INTEGER NOT NULL DEFAULT 0,
+PRIMARY KEY(profile_id,artist),
+CHECK(artist IS NOT NULL));
+CREATE TABLE "favorites" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+track_id INTEGER ,
+added_at TEXT NOT NULL,
+position INTEGER NOT NULL DEFAULT 0,
+PRIMARY KEY(profile_id,track_id),
+CHECK(track_id IS NOT NULL));
+CREATE TABLE "feature_weights" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+week_key TEXT NOT NULL,
+dim      INTEGER NOT NULL,
+weight   REAL NOT NULL,
+PRIMARY KEY(profile_id,week_key,dim),
+CHECK(week_key IS NOT NULL AND dim IS NOT NULL));
 CREATE TABLE features (
     track_id    INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
     embedding   BLOB,
@@ -101,6 +140,23 @@ CREATE TABLE genres (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE
 );
+CREATE TABLE installation_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO "installation_state" VALUES('legacy_user_id','330a64b2-4303-4813-bdc1-495b869c15a7');
+INSERT INTO "installation_state" VALUES('legacy_profile_id','8458c014-517b-401b-93de-54c6ab327596');
+INSERT INTO "installation_state" VALUES('active_admin_guard','1');
+CREATE TABLE invitations (
+    id             TEXT PRIMARY KEY,
+    secret_hash    TEXT NOT NULL UNIQUE,
+    created_by     TEXT REFERENCES users(id),
+    issuer         TEXT,
+    email          TEXT,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL,
+    consumed_at    TEXT,
+    revoked_at     TEXT,
+    consumed_by    TEXT REFERENCES users(id), target_user_id TEXT REFERENCES users(id),
+    CHECK (NOT (consumed_at IS NOT NULL AND revoked_at IS NOT NULL))
+);
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
@@ -111,27 +167,35 @@ CREATE TABLE jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE TABLE listen_later (
-    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
-    added_at TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE listening_history (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    track_id     INTEGER NOT NULL REFERENCES tracks(id),
-    ts           TEXT NOT NULL,
-    source       TEXT,
-    action       TEXT NOT NULL,
-    -- start|finish|skip|like|dislike|progress|track_end
-    daypart      TEXT,
-    weekday      INTEGER,
-    position_sec REAL,
-    duration_sec REAL,
-    listened_sec REAL,
-    session_id   TEXT,
-    reason       TEXT
-    -- completed|skipped|next|NULL
-, event_id TEXT, event_schema_version INTEGER NOT NULL DEFAULT 1, request_id TEXT REFERENCES recommendation_requests(request_id), impression_id TEXT, device_id TEXT, client_id TEXT, metadata_schema_version INTEGER, metadata_json TEXT);
+CREATE TABLE "listen_later" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+track_id INTEGER  REFERENCES tracks(id) ON DELETE CASCADE,
+added_at TEXT NOT NULL,
+position INTEGER NOT NULL DEFAULT 0,
+PRIMARY KEY(profile_id,track_id),
+CHECK(track_id IS NOT NULL));
+CREATE TABLE "listening_history" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+id           INTEGER PRIMARY KEY AUTOINCREMENT,
+track_id     INTEGER NOT NULL REFERENCES tracks(id),
+ts           TEXT NOT NULL,
+source       TEXT,
+action       TEXT NOT NULL,
+daypart      TEXT,
+weekday      INTEGER,
+position_sec REAL,
+duration_sec REAL,
+listened_sec REAL,
+session_id   TEXT,
+reason       TEXT,
+event_id TEXT,
+event_schema_version INTEGER NOT NULL DEFAULT 1,
+request_id TEXT ,
+impression_id TEXT,
+device_id TEXT,
+client_id TEXT,
+metadata_schema_version INTEGER,
+metadata_json TEXT,
+UNIQUE(profile_id,id),
+FOREIGN KEY(profile_id,request_id) REFERENCES recommendation_requests(profile_id,request_id));
 CREATE TABLE lyrics (
     track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
     plain_lyrics TEXT NOT NULL DEFAULT '',
@@ -144,130 +208,180 @@ CREATE TABLE lyrics (
     error TEXT,
     updated_at TEXT NOT NULL
 );
-CREATE TABLE model_versions (
-    model_version          TEXT PRIMARY KEY,
-    model_type             TEXT NOT NULL,
-    feature_schema_version INTEGER NOT NULL CHECK (feature_schema_version > 0),
-    artifact_path          TEXT NOT NULL,
-    artifact_hash          TEXT NOT NULL,
-    status                 TEXT NOT NULL CHECK (status IN ('candidate', 'active', 'rejected', 'retired')),
-    created_at             TEXT NOT NULL,
-    activated_at           TEXT
-);
-CREATE TABLE play_sessions (
-    id TEXT PRIMARY KEY,
-    mode TEXT NOT NULL DEFAULT '',
-    current_id INTEGER NOT NULL DEFAULT 0,
-    queue_json TEXT,
-    exclude_json TEXT,
-    rated_json TEXT,
-    daily_ids_json TEXT,
-    daily_pos INTEGER NOT NULL DEFAULT 0,
-    playlist_name TEXT NOT NULL DEFAULT '',
-    playlist_kind TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL
-, current_item_json TEXT, taste_state_schema_version INTEGER, taste_state_json TEXT, active_contexts_json TEXT, transition_profile TEXT NOT NULL DEFAULT 'smooth');
-CREATE TABLE playback_state (
-            owner_scope TEXT PRIMARY KEY DEFAULT 'local',
-            session_id TEXT NOT NULL DEFAULT '',
-            track_id INTEGER NOT NULL DEFAULT 0,
-            position_sec REAL NOT NULL DEFAULT 0,
-            listened_sec REAL NOT NULL DEFAULT 0,
-            playing INTEGER NOT NULL DEFAULT 0,
-            client_id TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
-        );
-CREATE TABLE "playlist_tracks" (
-                item_id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
-                playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-                position INTEGER NOT NULL,
-                track_id INTEGER REFERENCES tracks(id),
-                unresolved_artist TEXT,
-                unresolved_title TEXT,
-                unresolved_path TEXT,
-                added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                source TEXT NOT NULL DEFAULT 'manual',
-                note TEXT,
-                explanation TEXT,
-                PRIMARY KEY (playlist_id, position)
+CREATE TABLE "model_versions" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+model_version          TEXT ,
+model_type             TEXT NOT NULL,
+feature_schema_version INTEGER NOT NULL CHECK (feature_schema_version > 0),
+artifact_path          TEXT NOT NULL,
+artifact_hash          TEXT NOT NULL,
+status                 TEXT NOT NULL CHECK (status IN ('candidate', 'active', 'rejected', 'retired')),
+created_at             TEXT NOT NULL,
+activated_at           TEXT,
+PRIMARY KEY(profile_id,model_version),
+CHECK(model_version IS NOT NULL));
+CREATE TABLE "play_sessions" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+id TEXT PRIMARY KEY,
+mode TEXT NOT NULL DEFAULT '',
+current_id INTEGER NOT NULL DEFAULT 0,
+queue_json TEXT,
+exclude_json TEXT,
+rated_json TEXT,
+daily_ids_json TEXT,
+daily_pos INTEGER NOT NULL DEFAULT 0,
+playlist_name TEXT NOT NULL DEFAULT '',
+playlist_kind TEXT NOT NULL DEFAULT '',
+updated_at TEXT NOT NULL,
+current_item_json TEXT,
+taste_state_schema_version INTEGER,
+taste_state_json TEXT,
+active_contexts_json TEXT,
+transition_profile TEXT NOT NULL DEFAULT 'smooth',
+UNIQUE(profile_id,id));
+CREATE TABLE "playback_state" (
+                profile_id   TEXT NOT NULL REFERENCES profiles(id),
+                owner_scope  TEXT NOT NULL DEFAULT 'local',
+                session_id   TEXT NOT NULL DEFAULT '',
+                track_id     INTEGER NOT NULL DEFAULT 0,
+                position_sec REAL NOT NULL DEFAULT 0,
+                listened_sec REAL NOT NULL DEFAULT 0,
+                playing      INTEGER NOT NULL DEFAULT 0,
+                client_id    TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL,
+                PRIMARY KEY (profile_id, owner_scope)
             );
-CREATE TABLE playlists (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind        TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    meta_json   TEXT
-, type TEXT NOT NULL DEFAULT 'generated', description TEXT, updated_at TEXT, cover_track_id INTEGER REFERENCES tracks(id), cover_artwork TEXT, sort_mode TEXT NOT NULL DEFAULT 'manual', archived_at TEXT, rule_schema_version INTEGER, rule_json TEXT, allow_duplicates INTEGER NOT NULL DEFAULT 0, owner_scope TEXT NOT NULL DEFAULT 'local');
-CREATE TABLE radio_prefs (
-            owner_scope TEXT PRIMARY KEY DEFAULT 'local',
-            explore_lo  REAL NOT NULL DEFAULT 0.10 CHECK (explore_lo >= 0 AND explore_lo < 1),
-            explore_hi  REAL NOT NULL DEFAULT 0.40 CHECK (explore_hi > 0 AND explore_hi <= 1),
-            updated_at  TEXT NOT NULL,
-            CHECK (explore_lo < explore_hi)
-        );
-CREATE TABLE radio_rules (
-    rule_id       TEXT PRIMARY KEY,
-    target_type   TEXT NOT NULL
-        CHECK (target_type IN ('track', 'song', 'artist', 'album', 'genre', 'cluster')),
-    action        TEXT NOT NULL CHECK (action IN ('block', 'downrank', 'cooldown')),
-    scope         TEXT NOT NULL CHECK (scope IN ('session', 'context', 'global')),
-    target_key    TEXT NOT NULL,
-    strength      REAL NOT NULL CHECK (strength >= 0),
-    session_id    TEXT,
-    context_id    TEXT REFERENCES taste_contexts(context_id),
-    expires_at    TEXT,
+CREATE TABLE "playlist_tracks" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+item_id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+playlist_id INTEGER NOT NULL ,
+position INTEGER NOT NULL,
+track_id INTEGER REFERENCES tracks(id),
+unresolved_artist TEXT,
+unresolved_title TEXT,
+unresolved_path TEXT,
+added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+source TEXT NOT NULL DEFAULT 'manual',
+note TEXT,
+explanation TEXT,
+PRIMARY KEY(profile_id,playlist_id,position),
+CHECK(playlist_id IS NOT NULL AND position IS NOT NULL),
+FOREIGN KEY(profile_id,playlist_id) REFERENCES playlists(profile_id,id) ON DELETE CASCADE);
+CREATE TABLE "playlists" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+id          INTEGER PRIMARY KEY AUTOINCREMENT,
+kind        TEXT NOT NULL,
+name        TEXT NOT NULL,
+created_at  TEXT NOT NULL,
+meta_json   TEXT,
+type TEXT NOT NULL DEFAULT 'generated',
+description TEXT,
+updated_at TEXT,
+cover_track_id INTEGER REFERENCES tracks(id),
+cover_artwork TEXT,
+sort_mode TEXT NOT NULL DEFAULT 'manual',
+archived_at TEXT,
+rule_schema_version INTEGER,
+rule_json TEXT,
+allow_duplicates INTEGER NOT NULL DEFAULT 0,
+owner_scope TEXT NOT NULL DEFAULT 'local',
+UNIQUE(profile_id,id));
+CREATE TABLE profiles (
+    id            TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL REFERENCES users(id),
+    name          TEXT NOT NULL,
+    is_default    INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
     created_at    TEXT NOT NULL,
-    archived_at   TEXT,
-    CHECK (
+    updated_at    TEXT NOT NULL,
+    deleted_at    TEXT,
+    UNIQUE (id, owner_user_id)
+);
+INSERT INTO "profiles" VALUES('8458c014-517b-401b-93de-54c6ab327596','330a64b2-4303-4813-bdc1-495b869c15a7','Main',1,'2026-10-03T12:35:55.034610+00:00','2026-10-03T12:35:55.034610+00:00',NULL);
+CREATE TABLE "radio_prefs" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+owner_scope TEXT  DEFAULT 'local',
+explore_lo  REAL NOT NULL DEFAULT 0.10 CHECK (explore_lo >= 0 AND explore_lo < 1),
+explore_hi  REAL NOT NULL DEFAULT 0.40 CHECK (explore_hi > 0 AND explore_hi <= 1),
+updated_at  TEXT NOT NULL,
+CHECK (explore_lo < explore_hi),
+PRIMARY KEY(profile_id,owner_scope),
+CHECK(owner_scope IS NOT NULL));
+CREATE TABLE "radio_rules" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+rule_id       TEXT PRIMARY KEY,
+target_type   TEXT NOT NULL
+        CHECK (target_type IN ('track', 'song', 'artist', 'album', 'genre', 'cluster')),
+action        TEXT NOT NULL CHECK (action IN ('block', 'downrank', 'cooldown')),
+scope         TEXT NOT NULL CHECK (scope IN ('session', 'context', 'global')),
+target_key    TEXT NOT NULL,
+strength      REAL NOT NULL CHECK (strength >= 0),
+session_id    TEXT,
+context_id    TEXT ,
+expires_at    TEXT,
+created_at    TEXT NOT NULL,
+archived_at   TEXT,
+CHECK (
         (scope = 'session' AND session_id IS NOT NULL AND context_id IS NULL)
         OR (scope = 'context' AND context_id IS NOT NULL AND session_id IS NULL)
         OR (scope = 'global' AND session_id IS NULL AND context_id IS NULL)
-    )
-);
-CREATE TABLE radio_shares (
-    token TEXT PRIMARY KEY,
-    name TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    revoked_at TEXT,
-    last_listen_at TEXT,
-    listen_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE rec_stats (
-    track_id       INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
-    shown          INTEGER NOT NULL DEFAULT 0,
-    skipped_early  INTEGER NOT NULL DEFAULT 0,
-    completed      INTEGER NOT NULL DEFAULT 0,
-    updated_at     TEXT NOT NULL
-);
-CREATE TABLE recommendation_impressions (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT NOT NULL,
-    track_id        INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    position        INTEGER NOT NULL,
-    score           REAL NOT NULL DEFAULT 0,
-    cosine_taste    REAL NOT NULL DEFAULT 0,
-    cosine_current  REAL NOT NULL DEFAULT 0,
-    explore         INTEGER NOT NULL DEFAULT 0,
-    new_boost       INTEGER NOT NULL DEFAULT 0,
-    maturity        TEXT NOT NULL DEFAULT '',
-    mode            TEXT NOT NULL DEFAULT '',
-    shown_at        TEXT NOT NULL
-, impression_id TEXT, request_id TEXT REFERENCES recommendation_requests(request_id), source TEXT, features_schema_version INTEGER, features_json TEXT, queued_at TEXT, played_at TEXT, closed_at TEXT, outcome TEXT NOT NULL DEFAULT 'pending', listened_ratio REAL, legacy INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE recommendation_requests (
-    request_id       TEXT PRIMARY KEY,
-    session_id       TEXT NOT NULL,
-    reason           TEXT NOT NULL,
-    policy_version   TEXT NOT NULL,
-    model_version    TEXT,
-    candidate_count  INTEGER NOT NULL CHECK (candidate_count >= 0),
-    latency_ms       REAL NOT NULL CHECK (latency_ms >= 0),
-    created_at       TEXT NOT NULL
-, policy_schema_version INTEGER, policy_json TEXT);
-CREATE TABLE request_contexts (
-               request_id TEXT NOT NULL REFERENCES recommendation_requests(request_id) ON DELETE CASCADE,
-               context_id TEXT NOT NULL REFERENCES taste_contexts(context_id),
-               PRIMARY KEY (request_id, context_id)
-           );
+    ),
+UNIQUE(profile_id,rule_id),
+FOREIGN KEY(profile_id,context_id) REFERENCES taste_contexts(profile_id,context_id));
+CREATE TABLE "radio_shares" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+token TEXT PRIMARY KEY,
+name TEXT NOT NULL DEFAULT '',
+created_at TEXT NOT NULL,
+revoked_at TEXT,
+last_listen_at TEXT,
+listen_count INTEGER NOT NULL DEFAULT 0,
+UNIQUE(profile_id,token));
+CREATE TABLE "rec_stats" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+track_id       INTEGER  REFERENCES tracks(id) ON DELETE CASCADE,
+shown          INTEGER NOT NULL DEFAULT 0,
+skipped_early  INTEGER NOT NULL DEFAULT 0,
+completed      INTEGER NOT NULL DEFAULT 0,
+updated_at     TEXT NOT NULL,
+PRIMARY KEY(profile_id,track_id),
+CHECK(track_id IS NOT NULL));
+CREATE TABLE "recommendation_impressions" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+id              INTEGER PRIMARY KEY AUTOINCREMENT,
+session_id      TEXT NOT NULL,
+track_id        INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+position        INTEGER NOT NULL,
+score           REAL NOT NULL DEFAULT 0,
+cosine_taste    REAL NOT NULL DEFAULT 0,
+cosine_current  REAL NOT NULL DEFAULT 0,
+explore         INTEGER NOT NULL DEFAULT 0,
+new_boost       INTEGER NOT NULL DEFAULT 0,
+maturity        TEXT NOT NULL DEFAULT '',
+mode            TEXT NOT NULL DEFAULT '',
+shown_at        TEXT NOT NULL,
+impression_id TEXT,
+request_id TEXT ,
+source TEXT,
+features_schema_version INTEGER,
+features_json TEXT,
+queued_at TEXT,
+played_at TEXT,
+closed_at TEXT,
+outcome TEXT NOT NULL DEFAULT 'pending',
+listened_ratio REAL,
+legacy INTEGER NOT NULL DEFAULT 1,
+UNIQUE(profile_id,id),
+FOREIGN KEY(profile_id,request_id) REFERENCES recommendation_requests(profile_id,request_id));
+CREATE TABLE "recommendation_requests" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+request_id       TEXT PRIMARY KEY,
+session_id       TEXT NOT NULL,
+reason           TEXT NOT NULL,
+policy_version   TEXT NOT NULL,
+model_version    TEXT,
+candidate_count  INTEGER NOT NULL CHECK (candidate_count >= 0),
+latency_ms       REAL NOT NULL CHECK (latency_ms >= 0),
+created_at       TEXT NOT NULL,
+policy_schema_version INTEGER,
+policy_json TEXT,
+UNIQUE(profile_id,request_id));
+CREATE TABLE "request_contexts" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+request_id TEXT NOT NULL ,
+context_id TEXT NOT NULL ,
+PRIMARY KEY(profile_id,request_id,context_id),
+CHECK(request_id IS NOT NULL AND context_id IS NOT NULL),
+FOREIGN KEY(profile_id,request_id) REFERENCES recommendation_requests(profile_id,request_id) ON DELETE CASCADE,
+FOREIGN KEY(profile_id,context_id) REFERENCES taste_contexts(profile_id,context_id));
 CREATE TABLE scan_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -277,114 +391,123 @@ CREATE TABLE schema_migrations (
                applied_at TEXT NOT NULL
            );
 INSERT INTO "schema_migrations" VALUES('weekday_monday_zero_v1','2026-10-03T12:35:55.034610+00:00');
-CREATE TABLE session_contexts (
-    session_id  TEXT NOT NULL,
-    context_id  TEXT NOT NULL REFERENCES taste_contexts(context_id),
-    activated_at TEXT NOT NULL,
-    deactivated_at TEXT,
-    PRIMARY KEY (session_id, context_id, activated_at)
-);
-CREATE TABLE taste_centroids (
-    idx               INTEGER NOT NULL,
-    vector            BLOB NOT NULL,
-    embedding_dim     INTEGER NOT NULL CHECK (embedding_dim > 0),
-    mass              REAL NOT NULL CHECK (mass > 0),
-    label             TEXT,
-    sample_count      INTEGER NOT NULL CHECK (sample_count > 0),
-    updated_at        TEXT NOT NULL,
-    algorithm_version TEXT NOT NULL,
-    PRIMARY KEY (idx, algorithm_version)
-);
-CREATE TABLE taste_context_states (
-    context_id              TEXT PRIMARY KEY REFERENCES taste_contexts(context_id) ON DELETE CASCADE,
-    positive_vector         BLOB,
-    embedding_dim           INTEGER CHECK (embedding_dim > 0),
-    negative_schema_version INTEGER,
-    negative_prototypes_json TEXT,
-    positive_samples        INTEGER NOT NULL DEFAULT 0 CHECK (positive_samples >= 0),
-    negative_samples        INTEGER NOT NULL DEFAULT 0 CHECK (negative_samples >= 0),
-    model_version           TEXT NOT NULL,
-    updated_at              TEXT NOT NULL,
-    CHECK (
+CREATE TABLE "session_contexts" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+session_id  TEXT NOT NULL,
+context_id  TEXT NOT NULL ,
+activated_at TEXT NOT NULL,
+deactivated_at TEXT,
+PRIMARY KEY(profile_id,session_id,context_id,activated_at),
+CHECK(session_id IS NOT NULL AND context_id IS NOT NULL AND activated_at IS NOT NULL),
+FOREIGN KEY(profile_id,context_id) REFERENCES taste_contexts(profile_id,context_id));
+CREATE TABLE "taste_centroids" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+idx               INTEGER NOT NULL,
+vector            BLOB NOT NULL,
+embedding_dim     INTEGER NOT NULL CHECK (embedding_dim > 0),
+mass              REAL NOT NULL CHECK (mass > 0),
+label             TEXT,
+sample_count      INTEGER NOT NULL CHECK (sample_count > 0),
+updated_at        TEXT NOT NULL,
+algorithm_version TEXT NOT NULL,
+PRIMARY KEY(profile_id,idx,algorithm_version),
+CHECK(idx IS NOT NULL AND algorithm_version IS NOT NULL));
+CREATE TABLE "taste_context_states" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+context_id              TEXT  ,
+positive_vector         BLOB,
+embedding_dim           INTEGER CHECK (embedding_dim > 0),
+negative_schema_version INTEGER,
+negative_prototypes_json TEXT,
+positive_samples        INTEGER NOT NULL DEFAULT 0 CHECK (positive_samples >= 0),
+negative_samples        INTEGER NOT NULL DEFAULT 0 CHECK (negative_samples >= 0),
+model_version           TEXT NOT NULL,
+updated_at              TEXT NOT NULL,
+CHECK (
         (positive_vector IS NULL AND embedding_dim IS NULL)
         OR (positive_vector IS NOT NULL AND embedding_dim IS NOT NULL)
     ),
-    CHECK (
+CHECK (
         (negative_prototypes_json IS NULL AND negative_schema_version IS NULL)
         OR
         (negative_prototypes_json IS NOT NULL AND negative_schema_version IS NOT NULL
          AND negative_schema_version > 0 AND json_valid(negative_prototypes_json))
-    )
-);
-CREATE TABLE taste_contexts (
-    context_id              TEXT PRIMARY KEY,
-    kind                    TEXT NOT NULL CHECK (kind IN ('mood', 'place', 'activity')),
-    name                    TEXT NOT NULL,
-    icon                    TEXT,
-    influence               REAL NOT NULL DEFAULT 1 CHECK (influence >= 0),
-    learning_enabled        INTEGER NOT NULL DEFAULT 1 CHECK (learning_enabled IN (0, 1)),
-    activation_schema_version INTEGER,
-    activation_json         TEXT,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL,
-    archived_at             TEXT, seeds_schema_version INTEGER, seeds_json TEXT,
-    CHECK (
+    ),
+PRIMARY KEY(profile_id,context_id),
+CHECK(context_id IS NOT NULL),
+FOREIGN KEY(profile_id,context_id) REFERENCES taste_contexts(profile_id,context_id) ON DELETE CASCADE);
+CREATE TABLE "taste_contexts" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+context_id              TEXT PRIMARY KEY,
+kind                    TEXT NOT NULL CHECK (kind IN ('mood', 'place', 'activity')),
+name                    TEXT NOT NULL,
+icon                    TEXT,
+influence               REAL NOT NULL DEFAULT 1 CHECK (influence >= 0),
+learning_enabled        INTEGER NOT NULL DEFAULT 1 CHECK (learning_enabled IN (0, 1)),
+activation_schema_version INTEGER,
+activation_json         TEXT,
+created_at              TEXT NOT NULL,
+updated_at              TEXT NOT NULL,
+archived_at             TEXT,
+seeds_schema_version INTEGER,
+seeds_json TEXT,
+CHECK (
         (activation_json IS NULL AND activation_schema_version IS NULL)
         OR
         (activation_json IS NOT NULL AND activation_schema_version IS NOT NULL
          AND activation_schema_version > 0 AND json_valid(activation_json))
-    )
-);
-CREATE TABLE taste_states (
-    state_key               TEXT PRIMARY KEY,
-    positive_vector         BLOB,
-    embedding_dim           INTEGER,
-    positive_samples        INTEGER NOT NULL DEFAULT 0 CHECK (positive_samples >= 0),
-    negative_samples        INTEGER NOT NULL DEFAULT 0 CHECK (negative_samples >= 0),
-    negative_schema_version INTEGER,
-    negative_prototypes_json TEXT,
-    model_version           TEXT NOT NULL DEFAULT 'clap-default',
-    updated_at              TEXT NOT NULL,
-    CHECK (
+    ),
+UNIQUE(profile_id,context_id));
+CREATE TABLE "taste_states" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+state_key               TEXT ,
+positive_vector         BLOB,
+embedding_dim           INTEGER,
+positive_samples        INTEGER NOT NULL DEFAULT 0 CHECK (positive_samples >= 0),
+negative_samples        INTEGER NOT NULL DEFAULT 0 CHECK (negative_samples >= 0),
+negative_schema_version INTEGER,
+negative_prototypes_json TEXT,
+model_version           TEXT NOT NULL DEFAULT 'clap-default',
+updated_at              TEXT NOT NULL,
+CHECK (
         (positive_vector IS NULL AND embedding_dim IS NULL)
         OR (positive_vector IS NOT NULL AND embedding_dim > 0)
     ),
-    CHECK (
+CHECK (
         (negative_prototypes_json IS NULL AND negative_schema_version IS NULL)
         OR (negative_prototypes_json IS NOT NULL AND negative_schema_version > 0
             AND json_valid(negative_prototypes_json))
-    )
-);
+    ),
+PRIMARY KEY(profile_id,state_key),
+CHECK(state_key IS NOT NULL));
 CREATE TABLE track_genres (
     track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
     PRIMARY KEY (track_id, genre_id)
 );
-CREATE TABLE track_preferences (
-    track_id   INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
-    rating     TEXT NOT NULL DEFAULT 'neutral'
+CREATE TABLE "track_preferences" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+track_id   INTEGER  REFERENCES tracks(id) ON DELETE CASCADE,
+rating     TEXT NOT NULL DEFAULT 'neutral'
         CHECK (rating IN ('like', 'dislike', 'neutral')),
-    favorite   INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1)),
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE track_stats (
-    track_id         INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
-    plays            INTEGER NOT NULL DEFAULT 0 CHECK (plays >= 0),
-    finishes         INTEGER NOT NULL DEFAULT 0 CHECK (finishes >= 0),
-    partial          INTEGER NOT NULL DEFAULT 0 CHECK (partial >= 0),
-    early_skips      INTEGER NOT NULL DEFAULT 0 CHECK (early_skips >= 0),
-    likes            INTEGER NOT NULL DEFAULT 0 CHECK (likes >= 0),
-    dislikes         INTEGER NOT NULL DEFAULT 0 CHECK (dislikes >= 0),
-    last_played_at   TEXT,
-    last_finished_at TEXT,
-    updated_at       TEXT NOT NULL
-);
-CREATE TABLE track_tags (
-    tag_id     TEXT NOT NULL REFERENCES custom_tags(tag_id) ON DELETE CASCADE,
-    track_id   INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (tag_id, track_id)
-);
+favorite   INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1)),
+updated_at TEXT NOT NULL,
+PRIMARY KEY(profile_id,track_id),
+CHECK(track_id IS NOT NULL));
+CREATE TABLE "track_stats" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+track_id         INTEGER  REFERENCES tracks(id) ON DELETE CASCADE,
+plays            INTEGER NOT NULL DEFAULT 0 CHECK (plays >= 0),
+finishes         INTEGER NOT NULL DEFAULT 0 CHECK (finishes >= 0),
+partial          INTEGER NOT NULL DEFAULT 0 CHECK (partial >= 0),
+early_skips      INTEGER NOT NULL DEFAULT 0 CHECK (early_skips >= 0),
+likes            INTEGER NOT NULL DEFAULT 0 CHECK (likes >= 0),
+dislikes         INTEGER NOT NULL DEFAULT 0 CHECK (dislikes >= 0),
+last_played_at   TEXT,
+last_finished_at TEXT,
+updated_at       TEXT NOT NULL,
+PRIMARY KEY(profile_id,track_id),
+CHECK(track_id IS NOT NULL));
+CREATE TABLE "track_tags" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+tag_id     TEXT NOT NULL ,
+track_id   INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+created_at TEXT NOT NULL,
+PRIMARY KEY(profile_id,tag_id,track_id),
+CHECK(tag_id IS NOT NULL AND track_id IS NOT NULL),
+FOREIGN KEY(profile_id,tag_id) REFERENCES custom_tags(profile_id,tag_id) ON DELETE CASCADE);
 CREATE TABLE tracks (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     path            TEXT NOT NULL UNIQUE,
@@ -404,76 +527,93 @@ CREATE TABLE tracks (
     lufs            REAL,
     is_duplicate_of INTEGER REFERENCES tracks(id),
     is_active       INTEGER NOT NULL DEFAULT 1,
-    is_remaster     INTEGER NOT NULL DEFAULT 0,
-    -- JSON array of collaborator segments parsed at scan time.
-    artist_segments TEXT,
     artwork_path    TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
-, album_artist TEXT, is_compilation INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE training_runs (
-    run_id                 TEXT PRIMARY KEY,
-    model_version          TEXT REFERENCES model_versions(model_version),
-    model_type             TEXT NOT NULL,
-    feature_schema_version INTEGER NOT NULL CHECK (feature_schema_version > 0),
-    train_from             TEXT NOT NULL,
-    train_until            TEXT NOT NULL,
-    positive_count         INTEGER NOT NULL CHECK (positive_count >= 0),
-    negative_count         INTEGER NOT NULL CHECK (negative_count >= 0),
-    metrics_schema_version INTEGER NOT NULL CHECK (metrics_schema_version > 0),
-    metrics_json           TEXT NOT NULL CHECK (json_valid(metrics_json)),
-    status                 TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'rejected')),
-    created_at             TEXT NOT NULL,
-    completed_at           TEXT
+, is_remaster INTEGER NOT NULL DEFAULT 0, artist_segments TEXT, album_artist TEXT, is_compilation INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE "training_runs" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+run_id                 TEXT PRIMARY KEY,
+model_version          TEXT ,
+model_type             TEXT NOT NULL,
+feature_schema_version INTEGER NOT NULL CHECK (feature_schema_version > 0),
+train_from             TEXT NOT NULL,
+train_until            TEXT NOT NULL,
+positive_count         INTEGER NOT NULL CHECK (positive_count >= 0),
+negative_count         INTEGER NOT NULL CHECK (negative_count >= 0),
+metrics_schema_version INTEGER NOT NULL CHECK (metrics_schema_version > 0),
+metrics_json           TEXT NOT NULL CHECK (json_valid(metrics_json)),
+status                 TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'rejected')),
+created_at             TEXT NOT NULL,
+completed_at           TEXT,
+UNIQUE(profile_id,run_id),
+FOREIGN KEY(profile_id,model_version) REFERENCES model_versions(profile_id,model_version));
+CREATE TABLE "transition_stats" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+from_id         INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+to_id           INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+manual_count    INTEGER NOT NULL DEFAULT 0 CHECK (manual_count >= 0),
+radio_count     INTEGER NOT NULL DEFAULT 0 CHECK (radio_count >= 0),
+finished_count  INTEGER NOT NULL DEFAULT 0 CHECK (finished_count >= 0),
+partial_count   INTEGER NOT NULL DEFAULT 0 CHECK (partial_count >= 0),
+skip_count      INTEGER NOT NULL DEFAULT 0 CHECK (skip_count >= 0),
+decayed_weight  REAL NOT NULL DEFAULT 0,
+updated_at      TEXT NOT NULL,
+PRIMARY KEY(profile_id,from_id,to_id),
+CHECK(from_id IS NOT NULL AND to_id IS NOT NULL));
+CREATE TABLE "transitions" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+from_id INTEGER NOT NULL REFERENCES tracks(id),
+to_id   INTEGER NOT NULL REFERENCES tracks(id),
+weight  REAL NOT NULL DEFAULT 1.0,
+updated_at TEXT NOT NULL,
+PRIMARY KEY(profile_id,from_id,to_id),
+CHECK(from_id IS NOT NULL AND to_id IS NOT NULL));
+CREATE TABLE "user_profile_snapshots" (profile_id TEXT NOT NULL DEFAULT '8458c014-517b-401b-93de-54c6ab327596' REFERENCES profiles(id),
+id         INTEGER PRIMARY KEY AUTOINCREMENT,
+context    TEXT NOT NULL,
+embedding  BLOB NOT NULL,
+created_at TEXT NOT NULL,
+UNIQUE(profile_id,id));
+CREATE TABLE user_roles (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role    TEXT NOT NULL CHECK (role IN ('user', 'admin')),
+    PRIMARY KEY (user_id, role)
 );
-CREATE TABLE transition_stats (
-    from_id         INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    to_id           INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    manual_count    INTEGER NOT NULL DEFAULT 0 CHECK (manual_count >= 0),
-    radio_count     INTEGER NOT NULL DEFAULT 0 CHECK (radio_count >= 0),
-    finished_count  INTEGER NOT NULL DEFAULT 0 CHECK (finished_count >= 0),
-    partial_count   INTEGER NOT NULL DEFAULT 0 CHECK (partial_count >= 0),
-    skip_count      INTEGER NOT NULL DEFAULT 0 CHECK (skip_count >= 0),
-    decayed_weight  REAL NOT NULL DEFAULT 0,
-    updated_at      TEXT NOT NULL,
-    PRIMARY KEY (from_id, to_id)
+INSERT INTO "user_roles" VALUES('330a64b2-4303-4813-bdc1-495b869c15a7','admin');
+INSERT INTO "user_roles" VALUES('330a64b2-4303-4813-bdc1-495b869c15a7','user');
+CREATE TABLE users (
+    id           TEXT PRIMARY KEY,
+    status       TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+    display_name TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
 );
-CREATE TABLE transitions (
-    from_id INTEGER NOT NULL REFERENCES tracks(id),
-    to_id   INTEGER NOT NULL REFERENCES tracks(id),
-    weight  REAL NOT NULL DEFAULT 1.0,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (from_id, to_id)
-);
-CREATE TABLE user_profile_snapshots (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    context    TEXT NOT NULL,
-    -- global|morning|evening|weekday|weekend
-    embedding  BLOB NOT NULL,
-    created_at TEXT NOT NULL
-);
+INSERT INTO "users" VALUES('330a64b2-4303-4813-bdc1-495b869c15a7','disabled','Installation owner','2026-10-03T12:35:55.034610+00:00','2026-10-03T12:35:55.034610+00:00');
 CREATE INDEX idx_tracks_md5 ON tracks(file_md5);
 CREATE INDEX idx_tracks_fp ON tracks(fingerprint);
 CREATE INDEX idx_tracks_active ON tracks(is_active);
 CREATE INDEX idx_features_status ON features(status);
+CREATE INDEX idx_jobs_status ON jobs(status);
+CREATE INDEX idx_external_identities_user ON external_identities(user_id);
+CREATE INDEX idx_profiles_owner ON profiles(owner_user_id, deleted_at);
+CREATE UNIQUE INDEX idx_profiles_one_default
+    ON profiles(owner_user_id) WHERE is_default = 1 AND deleted_at IS NULL;
+CREATE INDEX idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
+CREATE INDEX idx_invitations_expires ON invitations(expires_at);
+CREATE UNIQUE INDEX idx_custom_tags_active_name
+    ON custom_tags(profile_id,name) WHERE archived_at IS NULL;
+CREATE INDEX "idx_custom_tags_profile" ON "custom_tags"(profile_id);
+CREATE INDEX idx_discover_kind ON discover_tips(kind, created_at);
+CREATE INDEX "idx_discover_tips_profile" ON "discover_tips"(profile_id);
+CREATE INDEX "idx_event_contexts_profile" ON "event_contexts"(profile_id);
+CREATE INDEX "idx_explore_arms_profile" ON "explore_arms"(profile_id);
+CREATE INDEX "idx_favorite_albums_profile" ON "favorite_albums"(profile_id);
+CREATE INDEX "idx_favorite_artists_profile" ON "favorite_artists"(profile_id);
+CREATE INDEX "idx_favorites_profile" ON "favorites"(profile_id);
+CREATE INDEX "idx_feature_weights_profile" ON "feature_weights"(profile_id);
+CREATE INDEX "idx_listen_later_profile" ON "listen_later"(profile_id);
 CREATE INDEX idx_history_ts ON listening_history(ts);
 CREATE INDEX idx_history_weekday_action ON listening_history(weekday, action);
-CREATE INDEX idx_impressions_shown_at ON recommendation_impressions(shown_at);
-CREATE INDEX idx_impressions_session_track
-    ON recommendation_impressions(session_id, track_id, shown_at);
-CREATE INDEX idx_playlists_kind_id ON playlists(kind, id DESC);
-CREATE INDEX idx_jobs_status ON jobs(status);
-CREATE INDEX idx_discover_kind ON discover_tips(kind, created_at);
-CREATE INDEX idx_recommendation_requests_session_created
-    ON recommendation_requests(session_id, created_at DESC);
-CREATE INDEX idx_session_contexts_active
-    ON session_contexts(session_id, deactivated_at);
-CREATE INDEX idx_radio_rules_active
-    ON radio_rules(scope, action, expires_at, archived_at);
-CREATE UNIQUE INDEX idx_model_versions_one_active_type
-    ON model_versions(model_type) WHERE status = 'active';
 CREATE UNIQUE INDEX idx_listening_history_event_id
-           ON listening_history(event_id) WHERE event_id IS NOT NULL;
+           ON listening_history(profile_id,event_id) WHERE event_id IS NOT NULL;
 CREATE INDEX idx_listening_history_request
            ON listening_history(request_id) WHERE request_id IS NOT NULL;
 CREATE TRIGGER trg_listening_history_metadata_insert
@@ -497,8 +637,38 @@ CREATE TRIGGER trg_listening_history_append_only_delete
         BEGIN
             SELECT RAISE(ABORT, 'listening_history is append-only');
         END;
+CREATE INDEX "idx_listening_history_profile" ON "listening_history"(profile_id);
+CREATE UNIQUE INDEX idx_model_versions_one_active_type
+    ON model_versions(profile_id,model_type) WHERE status = 'active';
+CREATE INDEX "idx_model_versions_profile" ON "model_versions"(profile_id);
+CREATE INDEX "idx_play_sessions_profile" ON "play_sessions"(profile_id);
+CREATE UNIQUE INDEX idx_playlist_tracks_item
+                ON playlist_tracks(profile_id,item_id);
+CREATE INDEX "idx_playlist_tracks_profile" ON "playlist_tracks"(profile_id);
+CREATE INDEX idx_playlists_kind_id ON playlists(kind, id DESC);
+CREATE TRIGGER trg_playlists_rule_json
+        BEFORE INSERT ON playlists
+        WHEN NOT (
+            (NEW.rule_json IS NULL AND NEW.rule_schema_version IS NULL)
+            OR
+            (NEW.rule_json IS NOT NULL AND NEW.rule_schema_version IS NOT NULL
+             AND NEW.rule_schema_version > 0 AND json_valid(NEW.rule_json))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'smart playlist rule requires valid versioned JSON');
+        END;
+CREATE INDEX "idx_playlists_profile" ON "playlists"(profile_id);
+CREATE INDEX "idx_radio_prefs_profile" ON "radio_prefs"(profile_id);
+CREATE INDEX idx_radio_rules_active
+    ON radio_rules(scope, action, expires_at, archived_at);
+CREATE INDEX "idx_radio_rules_profile" ON "radio_rules"(profile_id);
+CREATE INDEX "idx_radio_shares_profile" ON "radio_shares"(profile_id);
+CREATE INDEX "idx_rec_stats_profile" ON "rec_stats"(profile_id);
+CREATE INDEX idx_impressions_shown_at ON recommendation_impressions(shown_at);
+CREATE INDEX idx_impressions_session_track
+    ON recommendation_impressions(session_id, track_id, shown_at);
 CREATE UNIQUE INDEX idx_impressions_identity
-           ON recommendation_impressions(impression_id);
+           ON recommendation_impressions(profile_id,impression_id);
 CREATE INDEX idx_impressions_request
            ON recommendation_impressions(request_id, position);
 CREATE INDEX idx_impressions_pending_session
@@ -530,32 +700,9 @@ CREATE TRIGGER trg_impressions_lifecycle_insert
         BEGIN
             SELECT RAISE(ABORT, 'invalid recommendation impression lifecycle');
         END;
-CREATE UNIQUE INDEX idx_custom_tags_active_name
-    ON custom_tags(name) WHERE archived_at IS NULL;
-CREATE TRIGGER trg_playlists_rule_json
-        BEFORE INSERT ON playlists
-        WHEN NOT (
-            (NEW.rule_json IS NULL AND NEW.rule_schema_version IS NULL)
-            OR
-            (NEW.rule_json IS NOT NULL AND NEW.rule_schema_version IS NOT NULL
-             AND NEW.rule_schema_version > 0 AND json_valid(NEW.rule_json))
-        )
-        BEGIN
-            SELECT RAISE(ABORT, 'smart playlist rule requires valid versioned JSON');
-        END;
-CREATE UNIQUE INDEX idx_playlist_tracks_item
-                ON playlist_tracks(item_id);
-CREATE TRIGGER trg_taste_contexts_seeds_insert
-        BEFORE INSERT ON taste_contexts
-        WHEN NOT (
-            (NEW.seeds_json IS NULL AND NEW.seeds_schema_version IS NULL)
-            OR
-            (NEW.seeds_json IS NOT NULL AND NEW.seeds_schema_version IS NOT NULL
-             AND NEW.seeds_schema_version > 0 AND json_valid(NEW.seeds_json))
-        )
-        BEGIN
-            SELECT RAISE(ABORT, 'context seeds require valid versioned JSON');
-        END;
+CREATE INDEX "idx_recommendation_impressions_profile" ON "recommendation_impressions"(profile_id);
+CREATE INDEX idx_recommendation_requests_session_created
+    ON recommendation_requests(session_id, created_at DESC);
 CREATE TRIGGER trg_recommendation_requests_policy_insert
         BEFORE INSERT ON recommendation_requests
         WHEN NOT (
@@ -567,7 +714,41 @@ CREATE TRIGGER trg_recommendation_requests_policy_insert
         BEGIN
             SELECT RAISE(ABORT, 'request policy requires valid versioned JSON');
         END;
+CREATE INDEX "idx_recommendation_requests_profile" ON "recommendation_requests"(profile_id);
+CREATE INDEX "idx_request_contexts_profile" ON "request_contexts"(profile_id);
+CREATE INDEX idx_session_contexts_active
+    ON session_contexts(session_id, deactivated_at);
+CREATE INDEX "idx_session_contexts_profile" ON "session_contexts"(profile_id);
+CREATE INDEX "idx_taste_centroids_profile" ON "taste_centroids"(profile_id);
+CREATE INDEX "idx_taste_context_states_profile" ON "taste_context_states"(profile_id);
+CREATE TRIGGER trg_taste_contexts_seeds_insert
+        BEFORE INSERT ON taste_contexts
+        WHEN NOT (
+            (NEW.seeds_json IS NULL AND NEW.seeds_schema_version IS NULL)
+            OR
+            (NEW.seeds_json IS NOT NULL AND NEW.seeds_schema_version IS NOT NULL
+             AND NEW.seeds_schema_version > 0 AND json_valid(NEW.seeds_json))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'context seeds require valid versioned JSON');
+        END;
+CREATE INDEX "idx_taste_contexts_profile" ON "taste_contexts"(profile_id);
+CREATE INDEX "idx_taste_states_profile" ON "taste_states"(profile_id);
+CREATE INDEX "idx_track_preferences_profile" ON "track_preferences"(profile_id);
+CREATE INDEX "idx_track_stats_profile" ON "track_stats"(profile_id);
+CREATE INDEX "idx_track_tags_profile" ON "track_tags"(profile_id);
+CREATE INDEX "idx_training_runs_profile" ON "training_runs"(profile_id);
+CREATE INDEX "idx_transition_stats_profile" ON "transition_stats"(profile_id);
+CREATE INDEX "idx_transitions_profile" ON "transitions"(profile_id);
+CREATE INDEX "idx_user_profile_snapshots_profile" ON "user_profile_snapshots"(profile_id);
+CREATE INDEX idx_device_tokens_user
+            ON device_tokens(user_id, revoked_at, expires_at);
 DELETE FROM "sqlite_sequence";
+INSERT INTO "sqlite_sequence" VALUES('discover_tips',0);
+INSERT INTO "sqlite_sequence" VALUES('listening_history',0);
+INSERT INTO "sqlite_sequence" VALUES('playlists',0);
+INSERT INTO "sqlite_sequence" VALUES('recommendation_impressions',0);
+INSERT INTO "sqlite_sequence" VALUES('user_profile_snapshots',0);
 COMMIT;
 PRAGMA foreign_keys = ON;
-PRAGMA user_version = 10;
+PRAGMA user_version = 14;

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from musik.db.schema import connect
-from musik.db.store import get_embedding
 
 
 @dataclass(frozen=True)
@@ -106,25 +105,6 @@ class EmbeddingIndex:
         n = float(np.linalg.norm(mean))
         return (mean / n).astype(np.float32) if n > 1e-12 else mean.astype(np.float32)
 
-    def pairwise_stats(self) -> dict[str, float]:
-        if self.size < 2:
-            return {"n": float(self.size), "mean": 0.0, "min": 0.0, "max": 0.0}
-        S = self.matrix @ self.matrix.T
-        iu = np.triu_indices(self.size, k=1)
-        vals = S[iu]
-        # drop byte-dup pairs
-        mask = []
-        for i, j in zip(iu[0], iu[1], strict=True):
-            mask.append(self.md5s[int(i)] != self.md5s[int(j)])
-        vals = vals[np.asarray(mask)]
-        return {
-            "n_pairs": float(vals.size),
-            "mean": float(vals.mean()) if vals.size else 0.0,
-            "min": float(vals.min()) if vals.size else 0.0,
-            "max": float(vals.max()) if vals.size else 0.0,
-        }
-
-
 def load_index() -> EmbeddingIndex:
     """Load all active ready embeddings into RAM."""
     with connect() as conn:
@@ -200,11 +180,12 @@ def find_tracks(query: str, *, limit: int = 20) -> list[dict]:
             FROM tracks t
             LEFT JOIN features f ON f.track_id = t.id
             WHERE t.is_active = 1 AND t.is_duplicate_of IS NULL
-              AND (t.title LIKE ? OR t.artist LIKE ? OR t.path LIKE ?)
+              AND (lower(t.title) LIKE lower(:q) OR lower(t.artist) LIKE lower(:q)
+                   OR lower(t.path) LIKE lower(:q))
             ORDER BY t.artist, t.title
-            LIMIT ?
+            LIMIT :limit
             """,
-            (q, q, q, limit),
+            {"q": q, "limit": limit},
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -216,12 +197,8 @@ def get_track(track_id: int) -> dict | None:
             SELECT t.id, t.artist, t.title, t.path, t.file_md5, f.status, f.cluster_id
             FROM tracks t
             LEFT JOIN features f ON f.track_id = t.id
-            WHERE t.id = ?
+            WHERE t.id = :track_id
             """,
-            (track_id,),
+            {"track_id": track_id},
         ).fetchone()
         return dict(row) if row else None
-
-
-def embedding_of(track_id: int) -> np.ndarray | None:
-    return get_embedding(track_id)

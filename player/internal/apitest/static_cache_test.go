@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/torwin-job/musik/player/internal/api"
@@ -34,11 +33,9 @@ func TestStaticCacheHeaders(t *testing.T) {
 		{"/app.js", "no-cache"},
 		{"/style.css", "no-cache"},
 		{"/fonts.css", "no-cache"},
-		{"/redesign.css", "no-cache"},
-		{"/mozgolika.html", "no-cache"},
 		{"/themes/base.css", "no-cache"},
 		{"/themes/retro.css", "no-cache"},
-		{"/fonts/manrope-latin.woff2", "public, max-age=31536000, immutable"},
+		{"/fonts/plex-sans-400-latin.woff2", "public, max-age=31536000, immutable"},
 	}
 	for _, tc := range cases {
 		rec := serve(server, httptest.NewRequest("GET", tc.path, nil))
@@ -110,30 +107,4 @@ func gunzipBody(t *testing.T, rec *httptest.ResponseRecorder) []byte {
 		t.Fatal(err)
 	}
 	return raw
-}
-
-func TestInterfaceSwitchServesEitherPage(t *testing.T) {
-	server := openTestServer(t)
-	attachStatic(t, server)
-	get := func(cookie string) string {
-		req := jsonReq("GET", "/", "")
-		if cookie != "" {
-			req.AddCookie(&http.Cookie{Name: "musik_ui", Value: cookie})
-		}
-		rec := serve(server, req)
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Vary"), "Cookie") {
-			t.Fatalf("status=%d vary=%q", rec.Code, rec.Header().Get("Vary"))
-		}
-		return rec.Body.String()
-	}
-	if body := get(""); strings.Contains(body, "/redesign.css") {
-		t.Fatal("the original interface is the default")
-	}
-	if body := get("mozgolika"); !strings.Contains(body, "/redesign.css") {
-		t.Fatal("musik_ui=mozgolika must serve Mozgolika edition")
-	}
-	server.Cfg.UI = "mozgolika"
-	if body := get("original"); strings.Contains(body, "/redesign.css") {
-		t.Fatal("the cookie overrides MUSIK_UI")
-	}
 }

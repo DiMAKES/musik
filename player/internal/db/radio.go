@@ -19,8 +19,8 @@ type RadioShare struct {
 func (s *Store) CreateRadioShare(token, name string) (RadioShare, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.DB.Exec(`
-INSERT INTO radio_shares(token, name, created_at, listen_count)
-VALUES(?,?,?,0)`, token, name, now)
+INSERT INTO radio_shares(token, name, created_at, listen_count, profile_id)
+VALUES(?,?,?,0,?)`, token, name, now, s.ProfileID)
 	if err != nil {
 		return RadioShare{}, err
 	}
@@ -29,22 +29,15 @@ VALUES(?,?,?,0)`, token, name, now)
 
 func (s *Store) ListRadioShares(includeRevoked bool) ([]RadioShare, error) {
 	q := `SELECT token, name, created_at, revoked_at, last_listen_at, listen_count
-FROM radio_shares`
+FROM radio_shares WHERE profile_id = ?`
 	if !includeRevoked {
-		q += ` WHERE revoked_at IS NULL`
+		q += ` AND revoked_at IS NULL`
 	}
 	q += ` ORDER BY created_at DESC`
-	rows, err := s.DB.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []RadioShare
-	for rows.Next() {
-		var sh RadioShare
+	return QueryAll(s.DB, func(rows *sql.Rows, sh *RadioShare) error {
 		var revoked, last sql.NullString
 		if err := rows.Scan(&sh.Token, &sh.Name, &sh.CreatedAt, &revoked, &last, &sh.ListenCount); err != nil {
-			return nil, err
+			return err
 		}
 		if revoked.Valid {
 			sh.RevokedAt = &revoked.String
@@ -53,9 +46,8 @@ FROM radio_shares`
 			sh.LastListenAt = &last.String
 		}
 		sh.Active = !revoked.Valid
-		out = append(out, sh)
-	}
-	return out, rows.Err()
+		return nil
+	}, q, s.ProfileID)
 }
 
 func (s *Store) GetActiveRadioShare(token string) (RadioShare, bool, error) {
@@ -63,7 +55,7 @@ func (s *Store) GetActiveRadioShare(token string) (RadioShare, bool, error) {
 	var revoked, last sql.NullString
 	err := s.DB.QueryRow(`
 SELECT token, name, created_at, revoked_at, last_listen_at, listen_count
-FROM radio_shares WHERE token = ?`, token).Scan(
+FROM radio_shares WHERE profile_id = ? AND token = ?`, s.ProfileID, token).Scan(
 		&sh.Token, &sh.Name, &sh.CreatedAt, &revoked, &last, &sh.ListenCount)
 	if err == sql.ErrNoRows {
 		return RadioShare{}, false, nil
@@ -84,7 +76,7 @@ FROM radio_shares WHERE token = ?`, token).Scan(
 
 func (s *Store) RevokeRadioShare(token string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.DB.Exec(`UPDATE radio_shares SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL`, now, token)
+	res, err := s.DB.Exec(`UPDATE radio_shares SET revoked_at = ? WHERE profile_id = ? AND token = ? AND revoked_at IS NULL`, now, s.ProfileID, token)
 	if err != nil {
 		return err
 	}
@@ -99,6 +91,6 @@ func (s *Store) TouchRadioShareListen(token string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.DB.Exec(`
 UPDATE radio_shares SET listen_count = listen_count + 1, last_listen_at = ?
-WHERE token = ? AND revoked_at IS NULL`, now, token)
+WHERE profile_id = ? AND token = ? AND revoked_at IS NULL`, now, s.ProfileID, token)
 	return err
 }

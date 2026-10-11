@@ -12,6 +12,8 @@ from musik.brain.generators import generate_daily
 from musik.brain.mixes import generate_mix_pack
 from musik.brain.train_ranker import train_ranker
 from musik.config import get_settings
+from musik.db.schema import connect
+from musik.db.scoped_connection import profile_scope
 from musik.discover.albums import rebuild_discover_tips
 from musik.embed import embed_library
 from musik.index import assign_clusters
@@ -199,6 +201,12 @@ def _run_full_rescan(payload: dict[str, Any], *, job_id: int | None = None) -> d
     out["clusters"] = _run_clusters(payload)
     if job_id is not None:
         update_job_progress(job_id, {"phase": "full_rescan", "message": "album_tips…", "pct": 85})
+    if get_settings().multi_user:
+        out["profiles"] = {}
+        for profile_id in _active_profiles():
+            with profile_scope(profile_id):
+                out["profiles"][profile_id] = {"album_tips": _run_album_tips(payload), "mix_pack": _run_mix_pack(payload)}
+        return out
     out["album_tips"] = _run_album_tips(payload)
     if job_id is not None:
         update_job_progress(job_id, {"phase": "full_rescan", "message": "mix_pack…", "pct": 92})
@@ -206,7 +214,7 @@ def _run_full_rescan(payload: dict[str, Any], *, job_id: int | None = None) -> d
     return out
 
 
-def process_job(job: dict[str, Any]) -> dict[str, Any]:
+def _process_job(job: dict[str, Any]) -> dict[str, Any]:
     kind = job["kind"]
     payload = job.get("payload") or {}
     job_id = int(job["id"]) if job.get("id") is not None else None
@@ -229,9 +237,39 @@ def process_job(job: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"unknown job kind: {kind}")
 
 
+def _active_profiles() -> list[str]:
+    with connect() as conn:
+        return [row[0] for row in conn.execute(
+            "SELECT p.id FROM profiles p JOIN users u ON u.id=p.owner_user_id WHERE p.deleted_at IS NULL AND u.status='active' ORDER BY p.id"
+        )]
+
+
+def process_job(job: dict[str, Any]) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    selected = payload.get("profile_id")
+    if get_settings().multi_user:
+        profiles = _active_profiles()
+        if selected is not None and selected not in profiles:
+            raise ValueError("job profile is not active")
+        if selected is None and job["kind"] in {"daily", "mix_pack", "album_tips", "train_ranker"}:
+            results = {}
+            for profile_id in profiles:
+                with profile_scope(profile_id):
+                    results[profile_id] = _process_job(job)
+            return {"profiles": results}
+    if selected is None:
+        with connect() as conn:
+            selected = conn.profile_id
+    with profile_scope(selected):
+        return _process_job(job)
+
+
 def run_one() -> dict[str, Any] | None:
     """Claim and process a single pending job. Returns job summary or None."""
-    job = claim_next()
+    kinds = get_settings().worker_job_kinds
+    if kinds is not None and (not kinds or not set(kinds).issubset(JOB_KINDS)):
+        raise ValueError("worker_job_kinds must list known job kinds, or be unset for all")
+    job = claim_next(kinds=kinds)
     if not job:
         return None
     job_id = int(job["id"])

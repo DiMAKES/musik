@@ -1896,6 +1896,24 @@ button:focus-visible, input:focus-visible, summary:focus-visible, a:focus-visibl
   background-size: var(--bg-size, auto);
 }
 .login-gate[hidden] { display: none; }
+#oidc-login[hidden], #login-submit[hidden], #login-password[hidden],
+#account-box[hidden], #invitation-box[hidden], #profile-switch[hidden],
+#invitation-result[hidden], #device-token-created[hidden], #settings-box[hidden], .settings-qr[hidden] { display: none; }
+#account-box form, #invitation-box form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; }
+#account-box label, #invitation-box label { display: grid; gap: 6px; }
+#invitation-url { width: 100%; }
+.device-token-section { margin-top: 1.4rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.device-token-section h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
+.device-token-section .sub { max-width: 68ch; }
+.device-token-section select { min-width: 12rem; color: var(--fg); background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .55rem .65rem; }
+.device-token-secret { display: grid; gap: .45rem; margin: 1rem 0; padding: .85rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.device-token-secret p { margin: 0; }
+.device-token-secret input { width: 100%; min-width: 0; font-family: var(--font-mono, monospace); }
+.device-token-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.device-token-row { align-items: flex-start; }
+.device-token-row strong { flex: 0 1 10rem; }
+.device-token-row > span { white-space: pre-line; }
+.device-token-row .btn { align-self: center; }
 .login-card {
   width: min(420px, 100%);
   display: flex;
@@ -1910,7 +1928,8 @@ button:focus-visible, input:focus-visible, summary:focus-visible, a:focus-visibl
   backdrop-filter: blur(18px);
 }
 .login-card .brand { font-size: clamp(2.8rem, 10vw, 3.8rem); }
-.login-card input[type="password"] {
+.login-card input[type="password"],
+.login-card input[type="text"] {
   width: 100%;
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg) 72%, black);
@@ -2611,4 +2630,53 @@ html.theme-light .lib-tools select {
   padding: 10px;
   background: #fff;
   border-radius: var(--radius-sm);
+}
+
+/* Multi-user: profile switch, account and administration */
+.tabs #profile-switch {
+  flex: 0 0 auto;
+  max-width: 12rem;
+  padding: .45rem .7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg2);
+  color: var(--fg);
+  font: inherit;
+}
+.admin-list { display: grid; gap: .55rem; margin: .65rem 0 1rem; }
+.admin-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .55rem .8rem;
+  padding: .7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.admin-row strong { min-width: 8rem; }
+.admin-row > span { flex: 1 1 12rem; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+.admin-row select { color: var(--fg); background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .45rem; }
+.admin-row label { display: flex; align-items: center; gap: .35rem; }
+.device-token-qr svg { display: block; width: 220px; max-width: 100%; height: auto; margin: .6rem 0; border-radius: 8px; }
+@media (max-width: 720px) {
+  .tabs #profile-switch { max-width: 9rem; min-height: 40px; padding-inline: .5rem; }
+}
+
+#account-box input:not([type="checkbox"]), #invitation-box input, #account-box select {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: .55rem .65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg);
+  font: inherit;
+}
+#account-box label, #invitation-box label { min-width: 0; }
+#account-box .profile-switch-mobile { display: none; }
+@media (max-width: 760px) {
+  .tabs #profile-switch { display: none; }
+  #account-box .profile-switch-mobile { display: grid; margin-top: 1rem; }
+  #account-box form label, #invitation-box form label { flex: 1 1 12rem; }
 }
