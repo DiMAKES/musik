@@ -1,6 +1,6 @@
 services:
   player:
-    image: ghcr.io/${MUSIK_IMAGE_OWNER:-anatoliiii}/musik-player:${MUSIK_IMAGE_TAG:-local}
+    image: ghcr.io/${MUSIK_IMAGE_OWNER:-torwin-job}/musik-player:${MUSIK_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile.player
@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ghcr.io/${MUSIK_IMAGE_OWNER:-anatoliiii}/musik-worker:${MUSIK_IMAGE_TAG:-local}
+    image: ghcr.io/${MUSIK_IMAGE_OWNER:-torwin-job}/musik-worker:${MUSIK_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile.worker
@@ -67,7 +67,7 @@ services:
     restart: unless-stopped
 
   migrate:
-    image: ghcr.io/${MUSIK_IMAGE_OWNER:-anatoliiii}/musik-migrate:${MUSIK_IMAGE_TAG:-local}
+    image: ghcr.io/${MUSIK_IMAGE_OWNER:-torwin-job}/musik-migrate:${MUSIK_IMAGE_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile.migrate

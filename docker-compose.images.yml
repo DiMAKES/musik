@@ -1,8 +1,8 @@
 # Prebuilt CI images; configure .env, then run scripts/update-compose.sh.
-# Branch tags: branch-home, branch-pr-multiuser-postgres-mobile.
+# Tags: latest (main), v* releases, sha-<commit>, branch-<name>.
 services:
   player:
-    image: ghcr.io/${MUSIK_IMAGE_OWNER:-anatoliiii}/musik-player:${MUSIK_IMAGE_TAG:-branch-home}
+    image: ghcr.io/${MUSIK_IMAGE_OWNER:-torwin-job}/musik-player:${MUSIK_IMAGE_TAG:-latest}
     ports:
       - "8787:8787"   # behind a reverse proxy, prefer "127.0.0.1:8787:8787"
     env_file: .env
@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ghcr.io/${MUSIK_IMAGE_OWNER:-anatoliiii}/musik-worker:${MUSIK_IMAGE_TAG:-branch-home}
+    image: ghcr.io/${MUSIK_IMAGE_OWNER:-torwin-job}/musik-worker:${MUSIK_IMAGE_TAG:-latest}
     env_file: .env
     environment:
       MUSIK_DATABASE_URL: ${MUSIK_DATABASE_URL:-sqlite:////data/db/musik.db}
@@ -62,7 +62,7 @@ services:
     restart: unless-stopped
 
   migrate:
-    image: ghcr.io/${MUSIK_IMAGE_OWNER:-anatoliiii}/musik-migrate:${MUSIK_IMAGE_TAG:-branch-home}
+    image: ghcr.io/${MUSIK_IMAGE_OWNER:-torwin-job}/musik-migrate:${MUSIK_IMAGE_TAG:-latest}
     env_file: .env
     environment:
       MUSIK_DATABASE_URL: ${MUSIK_DATABASE_URL:-sqlite:////data/db/musik.db}
