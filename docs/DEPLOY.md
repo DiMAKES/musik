@@ -1,100 +1,123 @@
-# Deploy musik
+# Установка musik
 
-Один владелец: пароль для UI, Bearer-токен для API. Worker не публикуется наружу.
+Новая установка через Docker Compose. Для существующей установки —
+[UPGRADE.md](UPGRADE.md), все переменные `.env` — [CONFIG.md](CONFIG.md).
 
-## Auth (fail-closed)
+Состав: **player** (Go, веб-интерфейс и API, порт 8787), **worker** (Python:
+скан, эмбеддинги CLAP, задания; наружу не публикуется), **migrate** (готовит базу
+и завершается) и, по желанию, **postgres**. Player и worker стартуют только после
+успешного migrate. Go player схему не меняет, только проверяет её версию.
 
-Без `MUSIK_PASSWORD` и/или `MUSIK_API_TOKEN` player **не стартует**, пока явно не задано `MUSIK_AUTH_DISABLED=1` (только localhost-отладка).
-
-| Переменная | Назначение |
-|------------|------------|
-| `MUSIK_PASSWORD` | вход в Web UI (cookie) |
-| `MUSIK_API_TOKEN` | `Authorization: Bearer …` для API / Flutter |
-| `MUSIK_SESSION_SECRET` | HMAC cookie |
-| `MUSIK_SECURE_COOKIE=1` | cookie только по HTTPS |
-| `MUSIK_AUTH_DISABLED=1` | открытый режим (не для публичного IP) |
-| `MUSIK_CORS_ORIGINS` | список Origin через запятую для cross-origin (Flutter web); пусто = same-origin |
-
-Login: не больше 5 попыток / IP / минуту (`429`).
-
-## Docker Compose (рекомендуется)
+## 1. Код и образы
 
 ```bash
+git clone https://github.com/torwin-job/musik.git
+cd musik
 cp .env.example .env
-# обязательно: MUSIK_PASSWORD, MUSIK_API_TOKEN, MUSIK_SESSION_SECRET, MUSIK_LIBRARY
-
-make up
-make logs
-make rescan && make mixes
-make smoke
 ```
 
-Volumes: `musik-data` → SQLite + кэши; библиотека RO из `MUSIK_LIBRARY`.
+Образы — готовые или свои, как в [шаге 1 обновления](UPGRADE.md#1-новая-версия):
 
-Порядок старта Compose намеренно строгий:
+- готовые: `./scripts/update-compose.sh` (файл `docker-compose.images.yml`);
+- своя сборка: `./scripts/update-compose.sh --build` (файл `docker-compose.yml`).
 
-1. worker выполняет `musik db migrate`;
-2. worker начинает отвечать на `/health`;
-3. только после успешного healthcheck запускается player;
-4. player проверяет, что `PRAGMA user_version` точно совпадает с поддерживаемой
-   версией.
+Этот же скрипт запускает установку с нуля и применяет любые изменения `.env`.
 
-Go player никогда не создаёт и не изменяет таблицы.
+## 2. SQLite (по умолчанию)
 
-### Готовые образы (без сборки)
+Подходит для одного слушателя и небольших компаний. Заполните `.env`
+(подробно — [CONFIG.md](CONFIG.md)):
 
-GitHub Actions (`.github/workflows/images.yml`) собирает образы при каждом push в
-`main`, на теги `v*` и по кнопке: `ghcr.io/<owner>/musik-player` и
-`ghcr.io/<owner>/musik-worker` с тегами `latest`, `sha-<коммит>` и версией тега.
-Запуск из них — тот же стек, но без Go/torch на сервере:
+```dotenv
+MUSIK_LIBRARY=/srv/music
+MUSIK_PASSWORD=<openssl rand -hex 16>
+MUSIK_API_TOKEN=<openssl rand -hex 32>
+MUSIK_SESSION_SECRET=<openssl rand -hex 32>
+```
+
+Запуск:
 
 ```bash
-cp .env.example .env
-# обязательно: MUSIK_PASSWORD, MUSIK_API_TOKEN, MUSIK_SESSION_SECRET, MUSIK_LIBRARY
-docker compose -f docker-compose.images.yml pull
-docker compose -f docker-compose.images.yml up -d
+./scripts/update-compose.sh            # или --build
 ```
 
-`MUSIK_IMAGE_TAG` закрепляет конкретную сборку, `MUSIK_IMAGE_OWNER` — чьи образы
-брать (форк публикует свои). Новые пакеты GHCR создаются приватными: владельцу
-репозитория нужно один раз включить Public в настройках пакета.
+База создаётся в томе `musik-data` (`/data/db/musik.db`). Откройте
+`http://<адрес>:8787`, войдите паролем, в «Загрузке» нажмите
+«Пересканировать». Первый скан скачает модель CLAP (около 600 МБ) и посчитает
+эмбеддинги; прогресс виден там же.
 
-### Публичный VPS (белый IP)
+## 3. PostgreSQL
 
-1. Задай сильные секреты в `.env` (не `AUTH_DISABLED`).
-2. Наружу только `:8787` (player). Worker не публикуй.
-3. Reverse-proxy (Caddy/Nginx) → HTTPS.
-4. Env:
-   ```bash
-   MUSIK_PUBLIC_BASE_URL=https://music.example.com
-   MUSIK_SECURE_COOKIE=1
-   ```
-5. Бэкап: копируй `musik.db` (WAL) регулярно.
-6. Play-сессии пишутся в SQLite — переживают рестарт контейнера.
+Для больших библиотек и нескольких пользователей. Встроенный PostgreSQL 17
+работает в томе `musik-postgres` и не публикует порт наружу. К `.env` из
+раздела 2 добавьте:
 
-### LAN / телефон
-
-1. Compose уже публикует `8787`.
-2. `http://<lan-ip>:8787` → пароль.
-3. Для share-ссылок: `MUSIK_PUBLIC_BASE_URL=http://<lan-ip>:8787`.
-
-### Share radio
-
-Нужен **ffmpeg** (есть в `Dockerfile.player`).
-
-```bash
-MUSIK_PUBLIC_BASE_URL=https://music.example.com
-# MUSIK_SHARE_BITRATE=192k
-# MUSIK_SHARE_MAX_LISTENERS=4
+```dotenv
+COMPOSE_PROFILES=postgres
+MUSIK_POSTGRES_PASSWORD=<openssl rand -hex 32>
+MUSIK_DATABASE_URL=postgresql://musik:<тот же пароль>@postgres:5432/musik?sslmode=disable
 ```
 
-UI **Поделиться** → `…/listen/<token>.mp3`. Отозвать в Профиле. Слушатели не меняют вкус.
+и запустите тот же `./scripts/update-compose.sh`. `migrate` создаст схему в
+пустой базе.
+
+Внешний PostgreSQL: не задавайте `COMPOSE_PROFILES`, укажите в
+`MUSIK_DATABASE_URL` его адрес и `sslmode=require`. Пользователь из URL должен
+владеть пустой базой.
+
+Резервная копия: `docker compose exec postgres pg_dump -U musik -Fc musik > musik.dump`.
+SQLite копирует сервис `migrate` перед каждым изменением схемы (`/data/backups`).
+
+## 4. Несколько пользователей и OIDC
+
+Настраивается одинаково для SQLite и PostgreSQL, на новой установке сразу:
+вместо `MUSIK_PASSWORD`/`MUSIK_API_TOKEN` задайте переменные из
+[раздела 3 CONFIG.md](CONFIG.md#3-вход-несколько-пользователей), поставьте
+HTTPS reverse proxy и откройте приглашение первого администратора. Порядок
+действий — [шаги 3 и 4 UPGRADE.md](UPGRADE.md#3-несколько-пользователей); на
+новой установке у администратора просто нет прежних данных.
+
+## HTTPS
+
+Нужен для входа нескольких пользователей и желателен всегда при доступе из
+интернета. Опубликуйте player только на localhost и поставьте proxy:
+
+```yaml
+# docker-compose.override.yml
+services:
+  player:
+    ports: !override
+      - "127.0.0.1:8787:8787"
+```
+
+```caddyfile
+music.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+В `.env`: `MUSIK_PUBLIC_BASE_URL=https://music.example.com`, `MUSIK_SECURE_COOKIE=1`.
+Override-файл передавайте скрипту вместе с основным:
+`./scripts/update-compose.sh -f docker-compose.images.yml -f docker-compose.override.yml`.
+
+## Телефон в локальной сети
+
+Compose публикует порт 8787. Откройте `http://<IP компьютера>:8787`. Для QR и
+ссылок «поделиться» задайте `MUSIK_PUBLIC_BASE_URL=http://<IP>:8787`. QR
+подключения приложения — в «Профиль → Настройки сервера» (один владелец) или
+«Профиль → Устройства и токены» (несколько пользователей).
+
+## Поделиться радио
+
+«Поделиться» создаёт ссылку `…/listen/<token>.mp3`, которую открывает VLC,
+браузер или телефон. Слушатели не меняют ваш вкус; отозвать ссылку можно в
+«Профиле». Нужен `MUSIK_PUBLIC_BASE_URL`; битрейт и число слушателей —
+`MUSIK_SHARE_BITRATE`, `MUSIK_SHARE_MAX_LISTENERS`.
 
 ## Темы
 
-Плеер читает папку тем с диска при каждом запросе. Новая тема не требует пересборки и перезапуска: положи каталог и обнови страницу.
-
-По умолчанию это `data/themes` рядом с базой (`MUSIK_THEMES`). В Docker каталог — `/data/themes` на томе `musik-data`, не папка проекта:
+Плеер читает темы с диска при каждом запросе, перезапуск не нужен. В Docker это
+`/data/themes` на томе `musik-data`:
 
 ```bash
 docker compose cp themes/ink player:/data/themes/ink
@@ -102,37 +125,58 @@ docker compose cp themes/ink player:/data/themes/ink
 
 ```text
 data/themes/ink/
-  theme.json
-  theme.css
-  fonts/          # необязательно, только .woff2 / .woff
+  theme.json      # id (= имя папки), name, blurb, swatch, color
+  theme.css       # стили для html[data-theme="<id>"]
+  fonts/          # необязательно, .woff2 / .woff
 ```
 
-`theme.json` задаёт `id` (он же имя папки), `name`, `blurb`, `swatch` и `color`. `theme.css` стилизует `html[data-theme="<id>"]`. Готовый пример: `cp -a themes/ink data/themes/`. Папка с тем же `id`, что у встроенной темы, заменяет её файлы. Своя палитра из профиля по-прежнему живёт только в браузере.
+Папка с `id` встроенной темы заменяет её файлы. Своя палитра из «Профиля»
+хранится только в браузере.
 
 ## Makefile
 
-| Target | Действие |
-|--------|----------|
-| `make up` / `down` / `logs` | Compose |
-| `make rescan` / `mixes` | jobs (Bearer) |
-| `make smoke` | HTTP smoke с auth |
-| `make player` | сборка Go |
+| Цель | Действие |
+| --- | --- |
+| `make up` / `down` / `logs` | Compose со своей сборкой |
+| `make rescan` / `mixes` | Задания через API, нужен `MUSIK_API_TOKEN` в окружении |
+| `make smoke` | Проверка API |
+| `make player` | Сборка Go player |
 
-## Bare-metal
+## Без Docker
+
+Linux одной командой: `curl -fsSL https://raw.githubusercontent.com/torwin-job/musik/main/scripts/setup-linux.sh | bash`.
+Скрипт ставит зависимости, создаёт `.venv`, `.env`, выполняет `musik db migrate`
+и запускает сервисы (`scripts/musik.sh start|stop|restart|status|logs`).
+Windows: `scripts/setup-windows.ps1`.
+
+Вручную:
 
 ```bash
-export MUSIK_PASSWORD=… MUSIK_API_TOKEN=…
-export MUSIK_DB_PATH=$PWD/data/db/musik.db MUSIK_LIBRARY=/path/to/music
+export MUSIK_DATABASE_URL="sqlite:///$PWD/data/db/musik.db" MUSIK_LIBRARY=/path/to/music
+export MUSIK_PASSWORD=… MUSIK_API_TOKEN=… MUSIK_SESSION_SECRET=…
 musik db migrate
-musik scan && musik embed && musik clusters
-musik worker   # terminal 1
-./player/bin/musik-player   # terminal 2
+musik worker &                 # фоновые задания
+make player && ./player/bin/musik-player
 ```
 
-Schema: единственный владелец — пронумерованные Python-миграции
-`src/musik/db/migrations.py`. Повторный `musik db migrate` безопасен. Если база
-старее или новее поддерживаемой версии, player завершает старт и печатает
-команду исправления.
+`musik db migrate` создаёт новую базу или обновляет существующую (SQLite v5 и
+новее) до текущей схемы. Player и worker с неподходящей схемой не стартуют и
+просят выполнить миграцию.
 
-Подробнее: [ROADMAP.md](ROADMAP.md) · [API.md](API.md) · [MOBILE.md](MOBILE.md) ·
-**[CAPACITY.md](CAPACITY.md)** (ресурсы под 50k треков).
+### PostgreSQL без Docker
+
+Создайте пустую базу и перенесите в неё SQLite после остановки player и worker:
+
+```bash
+musik db transfer --source data/db/musik.db \
+  --destination "postgresql://musik:…@db.example.net/musik?sslmode=require" \
+  --report musik-transfer-report.json
+```
+
+Команда не изменяет исходный файл: делает снимок, проверяет его, копирует
+строки и сверяет число строк и SHA-256 каждой таблицы. После успешного отчёта
+укажите тот же URL в `MUSIK_DATABASE_URL` для player и worker. Аудиофайлы и
+кеши база не переносит.
+
+Подробнее: [API.md](API.md) · [MOBILE.md](MOBILE.md) · [CAPACITY.md](CAPACITY.md)
+(ресурсы под 50 тыс. треков).

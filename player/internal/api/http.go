@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -89,7 +91,8 @@ func (s *Server) staticHandler() http.Handler {
 		}
 		setStaticCacheControl(w, r.URL.Path)
 		if r.URL.Path == "/" || r.URL.Path == "" {
-			f, err := s.Static.Open("index.html")
+			page := s.uiPage(r)
+			f, err := s.Static.Open(page)
 			if err != nil {
 				http.NotFound(w, r)
 				return
@@ -102,16 +105,31 @@ func (s *Server) staticHandler() http.Handler {
 			}
 			rs, ok := f.(io.ReadSeeker)
 			if !ok {
-				r.URL.Path = "/index.html"
+				r.URL.Path = "/" + page
 				fileServer.ServeHTTP(w, r)
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			http.ServeContent(w, r, "index.html", modTime(stat), rs)
+			// The same URL serves either interface; caches must key on the cookie.
+			w.Header().Add("Vary", "Cookie")
+			http.ServeContent(w, r, page, modTime(stat), rs)
 			return
 		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// uiPage picks the interface for "/": the musik_ui cookie set from the
+// interface switch, else MUSIK_UI, else the original interface.
+func (s *Server) uiPage(r *http.Request) string {
+	choice := s.Cfg.UI
+	if c, err := r.Cookie("musik_ui"); err == nil {
+		choice = c.Value
+	}
+	if choice == "mozgolika" {
+		return "mozgolika.html"
+	}
+	return "index.html"
 }
 
 func setStaticCacheControl(w http.ResponseWriter, path string) {
@@ -124,12 +142,15 @@ func staticCacheControl(path string) string {
 	if strings.HasPrefix(path, "/fonts/") && strings.HasSuffix(strings.ToLower(path), ".woff2") {
 		return "public, max-age=31536000, immutable"
 	}
+	if strings.HasPrefix(path, "/icons/") {
+		return "public, max-age=604800"
+	}
 	switch path {
-	case "/", "", "/index.html":
+	case "/", "", "/index.html", "/mozgolika.html":
 		// Revalidate the page itself: with max-age=3600 a browser keeps an old
 		// index.html (and the app.js it pairs with) for up to an hour after a deploy.
 		return "no-cache"
-	case "/app.js", "/style.css", "/fonts.css":
+	case "/app.js", "/style.css", "/fonts.css", "/redesign.css":
 		// Revalidate with the page. max-age kept a stale UI for an hour after a refresh.
 		return "no-cache"
 	default:
@@ -199,6 +220,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"ok": true, "version": Version, "api_version": APIVersion,
 		"auth": s.Auth != nil && s.Auth.Cfg.Enabled(),
+		// Open pages compare it with the value they loaded with and reload
+		// themselves after a deploy, so no device keeps running old JS.
+		"static": s.staticVersion(),
 	}
 	if s.Auth == nil || !s.Auth.Cfg.Enabled() || s.Auth.Authorized(r) {
 		out["tracks"] = s.Idx.Size()
@@ -207,10 +231,32 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// staticVersion hashes the UI files. Hashed on every call: they are small and
+// a static dir on disk (MUSIK_STATIC_DIR) can change without a restart.
+func (s *Server) staticVersion() string {
+	if s.Static == nil {
+		return ""
+	}
+	h := sha256.New()
+	for _, name := range []string{"index.html", "mozgolika.html", "app.js", "style.css", "redesign.css"} {
+		f, err := s.Static.Open(name)
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(h, f)
+		_ = f.Close()
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	mat := s.Play.Maturity()
 	explore := s.Play.Explore()
 	sessionCount := s.Play.SessionCount()
+	dbBackend := s.Store.Dialect
+	if dbBackend == "postgres" {
+		dbBackend = "postgresql"
+	}
 	out := map[string]any{
 		"tracks": s.Idx.Size(), "dim": s.Idx.Dim(),
 		"taste_ready":      s.Taste.Ready(),
@@ -220,7 +266,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"explore_lo":       s.exploreState()["explore_lo"],
 		"explore_hi":       s.exploreState()["explore_hi"],
 		"model_version":    s.Play.Ranker.ModelVersion,
-		"db":               s.Cfg.DBPath,
+		"db_backend":       dbBackend,
 		"worker_url":       s.Cfg.WorkerURL,
 		"worker_autostart": s.Cfg.WorkerAutostart,
 	}
@@ -243,10 +289,16 @@ func (s *Server) handleManifest(w http.ResponseWriter, _ *http.Request) {
   "name": "musik",
   "short_name": "musik",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#141210",
   "theme_color": "#c45c26",
-  "description": "Local smart music player"
+  "description": "Local smart music player",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
 }`))
 }
 

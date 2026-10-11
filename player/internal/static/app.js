@@ -45,21 +45,26 @@ function deviceId() {
   return navigator.userAgentData?.platform || navigator.platform || "web";
 }
 
-let sessionId = sessionStorage.getItem("musik_session") || null;
+// localStorage, not sessionStorage: the session must survive closing the tab.
+let sessionId = localStorage.getItem("musik_session") || null;
 let current = null;
 let playlist = [];
+let currentQueue = [];
+let queueKind = "queue"; // "queue" (radio) or "playlist" (fixed list)
 let fixedMode = false;
 let lastProgressAt = 0;
 let listenedAccum = 0;
 let lastPos = 0;
 let library = [];
 let libTab = "tracks";
+let libArtist = null; // artist page open inside the "artists" tab
 let libSort = "artist";
 let plAddTab = "tracks";
 let plAddSort = "artist";
 let libTimer = null;
 let seeking = false;
 let playbackGen = 0;
+let unplayableRun = 0; // tracks in a row that failed to play
 let toastTimer = null;
 let jobPollTimer = null;
 let backgroundJobsTimer = null;
@@ -69,6 +74,7 @@ const knownJobStatuses = new Map();
 let favoriteIds = new Set();
 let favoriteArtists = new Set();
 let favoriteAlbums = new Set(); // "artist\0album"
+const trackRatings = new Map(); // track_id -> "like" | "dislike" (this browser)
 let homeHydrated = false;
 const wiredShelves = new WeakSet();
 const shelfAnim = new WeakMap();
@@ -79,6 +85,214 @@ function albumKey(artist, album) {
 
 let authEnabled = false;
 let authReady = false;
+let multiUser = false;
+let account = null;
+
+function csrfHeaders() {
+  const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("musik_csrf="));
+  return cookie ? { "X-CSRF-Token": decodeURIComponent(cookie.slice("musik_csrf=".length)) } : {};
+}
+
+function renderAccount(me) {
+  multiUser = !!me.multi_user;
+  account = me.authenticated ? me : null;
+  const invitation = new URLSearchParams(location.search).get("invitation");
+  $("login-username").hidden = !multiUser;
+  $("login-username").required = multiUser;
+  $("login-password").autocomplete = invitation ? "new-password" : "current-password";
+  $("login-submit").textContent = multiUser && invitation ? "Создать аккаунт" : "Войти";
+  $("oidc-login").hidden = !multiUser || !me.oidc;
+  $("oidc-login").href = "/api/auth/oidc/default/start" + (invitation ? `?invitation=${encodeURIComponent(invitation)}` : "");
+  $("login-tagline").textContent = !multiUser ? "Введи пароль, чтобы открыть библиотеку"
+    : invitation ? "Придумай имя и пароль (от 8 символов)" : "Войди по имени и паролю";
+  $("account-box").hidden = !account;
+  $("profile-switch").hidden = !account;
+  const admin = !!account?.user?.roles?.includes("admin");
+  $("invitation-box").hidden = !admin;
+  $("settings-box").hidden = multiUser && !admin;
+  $("oidc-link").hidden = !multiUser || !account || !me.oidc;
+  $("password-form").hidden = !account?.local_account;
+  document.querySelector('[data-view="upload"]').hidden = multiUser && !admin;
+  if (admin) refreshAdminLists().catch((error) => toast(error.message));
+  if (!account) return;
+  refreshDeviceTokenProfiles();
+  refreshDeviceTokens().catch((error) => toast(error.message));
+  const identity = `${account.user.id}/${account.active_profile.id}`;
+  if (sessionStorage.getItem("musik_identity") !== identity) {
+    sessionStorage.removeItem("musik_session");
+    sessionId = null;
+    sessionStorage.setItem("musik_identity", identity);
+  }
+  document.querySelectorAll("[data-profile-switch]").forEach((select) => {
+    select.replaceChildren();
+    for (const profile of account.profiles) {
+      const option = document.createElement("option");
+      option.value = profile.id;
+      option.textContent = profile.name;
+      option.selected = profile.id === account.active_profile.id;
+      select.append(option);
+    }
+  });
+  $("account-display").textContent = account.user.display_name;
+  $("profile-active-name").value = account.active_profile.name;
+  $("profile-delete").disabled = account.profiles.length < 2;
+}
+
+function adminRow(label, detail) {
+  const row = document.createElement("div");
+  row.className = "admin-row";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const subtitle = document.createElement("span");
+  subtitle.textContent = detail;
+  row.append(title, subtitle);
+  return row;
+}
+
+function refreshDeviceTokenProfiles() {
+  const select = $("device-token-profile");
+  if (!select || !account) return;
+  select.replaceChildren();
+  for (const profile of account.profiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.is_default ? `${profile.name} · основной` : profile.name;
+    option.selected = profile.is_default;
+    select.append(option);
+  }
+}
+
+function deviceDate(value) {
+  if (!value) return "ещё не использовался";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function showDeviceTokenSecret(secret, qr) {
+  $("device-token-secret").value = secret;
+  // The server renders the QR (musik://connect with this token) as SVG.
+  $("device-token-qr").innerHTML = qr || "";
+  $("device-token-qr").hidden = !qr;
+  $("device-token-created").hidden = false;
+  $("device-token-created").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function deviceTokenRow(token) {
+  const row = adminRow(token.name || "Устройство", `Профиль: ${token.profile_name}\nСоздан: ${deviceDate(token.created_at)}\nПоследнее использование: ${deviceDate(token.last_used_at)}\nДействует до: ${deviceDate(token.expires_at)}${token.revoked_at ? `\nОтозван: ${deviceDate(token.revoked_at)}` : ""}`);
+  row.classList.add("device-token-row");
+  if (!token.revoked_at) {
+    const replace = document.createElement("button");
+    replace.className = "btn";
+    replace.type = "button";
+    replace.textContent = "Заменить";
+    replace.onclick = async () => {
+      if (!confirm(`Выпустить новый токен для «${token.name}»? Текущий перестанет работать.`)) return;
+      replace.disabled = true;
+      try {
+        const result = await api(`/api/account/device-tokens/${encodeURIComponent(token.id)}/replace`, { method: "POST", body: "{}" });
+        showDeviceTokenSecret(result.token, result.qr);
+        await refreshDeviceTokens();
+      } catch (error) { toast(error.message); }
+      finally { replace.disabled = false; }
+    };
+    const revoke = document.createElement("button");
+    revoke.className = "btn";
+    revoke.type = "button";
+    revoke.textContent = "Отозвать";
+    revoke.onclick = async () => {
+      if (!confirm(`Отозвать токен устройства «${token.name}»?`)) return;
+      revoke.disabled = true;
+      try {
+        await api(`/api/account/device-tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+        await refreshDeviceTokens();
+      } catch (error) { toast(error.message); }
+      finally { revoke.disabled = false; }
+    };
+    row.append(replace, revoke);
+  }
+  return row;
+}
+
+async function refreshDeviceTokens() {
+  if (!multiUser || !account) return;
+  const data = await api("/api/account/device-tokens");
+  const list = $("device-token-list");
+  list.replaceChildren();
+  for (const token of data.tokens || []) list.append(deviceTokenRow(token));
+  if (!list.childElementCount) {
+    const empty = document.createElement("p");
+    empty.className = "sub";
+    empty.textContent = "Пока нет выданных токенов.";
+    list.append(empty);
+  }
+}
+
+async function refreshAdminLists() {
+  if (!multiUser || !account?.user?.roles?.includes("admin")) return;
+  const [users, invitations] = await Promise.all([
+    api("/api/admin/users"),
+    api("/api/admin/invitations"),
+  ]);
+  const userList = $("admin-users");
+  userList.replaceChildren();
+  for (const user of users) {
+    const row = adminRow(user.display_name || "Пользователь", `${user.id} · профилей: ${user.profiles}`);
+    const status = document.createElement("select");
+    status.setAttribute("aria-label", `Статус ${user.display_name || user.id}`);
+    for (const [value, label] of [["active", "Активен"], ["disabled", "Отключён"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      status.append(option);
+    }
+    status.value = user.status;
+    const adminLabel = document.createElement("label");
+    const admin = document.createElement("input");
+    admin.type = "checkbox";
+    admin.checked = user.admin;
+    adminLabel.append(admin, document.createTextNode(" Администратор"));
+    const save = document.createElement("button");
+    save.className = "btn";
+    save.type = "button";
+    save.textContent = "Сохранить";
+    save.onclick = async () => {
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: status.value, admin: admin.checked }),
+        });
+        await ensureAuth();
+        await refreshAdminLists();
+        toast("Доступ обновлён");
+      } catch (error) { toast(error.message); }
+    };
+    row.append(status, adminLabel, save);
+    userList.append(row);
+  }
+  const inviteList = $("admin-invitations");
+  inviteList.replaceChildren();
+  for (const invitation of invitations) {
+    const pending = !invitation.consumed_at && !invitation.revoked_at && Date.parse(invitation.expires_at) > Date.now();
+    const state = invitation.consumed_at ? "Использовано" : invitation.revoked_at ? "Отозвано" : pending ? "Ожидает входа" : "Истекло";
+    const row = adminRow(invitation.email || "Без привязки к email", `${state} · до ${new Date(invitation.expires_at).toLocaleString()}`);
+    if (pending) {
+      const revoke = document.createElement("button");
+      revoke.className = "btn";
+      revoke.type = "button";
+      revoke.textContent = "Отозвать";
+      revoke.onclick = async () => {
+        try {
+          await api(`/api/admin/invitations/${encodeURIComponent(invitation.id)}`, { method: "DELETE" });
+          await refreshAdminLists();
+        } catch (error) { toast(error.message); }
+      };
+      row.append(revoke);
+    }
+    inviteList.append(row);
+  }
+  if (!users.length) userList.textContent = "Пользователей пока нет";
+  if (!invitations.length) inviteList.textContent = "Приглашений пока нет";
+}
 
 function showLogin(message) {
   const gate = $("login-gate");
@@ -104,7 +318,7 @@ function hideLogin() {
 }
 
 async function api(path, opts = {}) {
-  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const headers = { "Content-Type": "application/json", ...csrfHeaders(), ...(opts.headers || {}) };
   const res = await fetch(path, {
     credentials: "same-origin",
     ...opts,
@@ -134,6 +348,7 @@ async function api(path, opts = {}) {
 
 async function ensureAuth() {
   const me = await api("/api/auth/me");
+  renderAccount(me);
   authEnabled = !!me.auth_enabled;
   if (!authEnabled || me.ok) {
     hideLogin();
@@ -146,10 +361,12 @@ async function ensureAuth() {
 }
 
 async function doLogin(password) {
-  await api("/api/auth/login", {
+  const invitation = multiUser && new URLSearchParams(location.search).get("invitation");
+  await api(invitation ? "/api/auth/register" : "/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(multiUser ? { username: $("login-username").value, password, invitation } : { password }),
   });
+  if (multiUser) { location.replace("/"); return; }
   hideLogin();
   authReady = true;
   await bootApp();
@@ -157,8 +374,9 @@ async function doLogin(password) {
 
 async function doLogout() {
   await api("/api/auth/logout", { method: "POST", body: "{}" });
-  sessionStorage.removeItem("musik_session");
-  sessionId = null;
+  setSession(null);
+  $("audio")?.pause();
+  if (multiUser) { sessionStorage.removeItem("musik_identity"); location.reload(); return; }
   if (authEnabled) {
     showLogin();
     authReady = false;
@@ -194,18 +412,29 @@ function fmtTime(sec) {
 }
 
 function setSession(id) {
-  sessionId = id;
-  if (id) sessionStorage.setItem("musik_session", id);
+  sessionId = id || null;
+  try {
+    if (id) localStorage.setItem("musik_session", id);
+    else localStorage.removeItem("musik_session");
+  } catch (_) {}
 }
 
 function setSeekPct(pct) {
   $("seek").style.setProperty("--seek-pct", `${Math.max(0, Math.min(100, pct))}%`);
 }
 
-function setView(name) {
+const NAV_OF_VIEW = { home: "listen", library: "collection", collections: "collection", profile: "me", upload: "me", player: "now" };
+
+function setView(name, nav = NAV_OF_VIEW[name]) {
+  document.body.dataset.nav = nav || "";
+  const title = $("lib-title");
+  if (title) title.textContent = nav === "search" ? "Поиск" : "Коллекция";
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
   document.querySelectorAll(".tab[data-view]").forEach((b) => {
-    const active = b.dataset.view === name;
+    // In Mozgolika edition primary tabs light up for their whole section and
+    // secondary ones only for their own screen; the original tabs have no
+    // sections and light up for their view.
+    const active = !b.dataset.nav || b.classList.contains("tab-secondary") ? b.dataset.view === name : b.dataset.nav === nav;
     b.classList.toggle("active", active);
     if (active) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
@@ -219,6 +448,7 @@ function setView(name) {
   if (name === "library") loadLibrary().catch(console.error);
   if (name === "collections") loadPlaylists().catch(console.error);
   if (name === "profile") {
+    loadSettings().catch(console.error);
     loadInstalledThemes();
     loadProfile().catch(console.error);
     loadShares().catch(console.error);
@@ -355,13 +585,38 @@ function wireAllShelves() {
   });
 }
 
+// Collaborator segments are parsed once at scan time and delivered by the API
+// (row.artists). The UI never re-splits a credit — it only shows what it got.
+function trackArtists(t) {
+  const list = Array.isArray(t?.artists)
+    ? t.artists.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
+  if (list.length) return list;
+  const raw = String(t?.artist || "").trim();
+  return raw ? [raw] : [];
+}
+
+function primaryArtist(t) {
+  return trackArtists(t)[0] || String(t?.artist || "").trim();
+}
+
+// Who the track's album is listed under: the album credit of a compilation
+// ("Various Artists"), else the primary artist. Same rule as the server.
+function albumOwner(t) {
+  return String(t?.album_artist || "").trim() || primaryArtist(t);
+}
+
 async function loadFavorites() {
   try {
     const data = await api("/api/favorites");
     favoriteIds = new Set((data.ids || []).map(Number));
-    favoriteArtists = new Set((data.artists || []).map((a) => a.artist));
+    favoriteArtists = new Set(
+      (data.artists || []).map((a) => String(a.artist || "").trim()).filter(Boolean)
+    );
     favoriteAlbums = new Set(
-      (data.albums || []).map((a) => albumKey(a.artist, a.album))
+      (data.albums || [])
+        .map((a) => albumKey(String(a.artist || "").trim(), a.album))
+        .filter((k) => !k.startsWith("\0"))
     );
     return data;
   } catch (_) {
@@ -387,8 +642,9 @@ function setEntityFavChips() {
     if (b) b.classList.remove("on");
     return;
   }
-  if (a) a.classList.toggle("on", favoriteArtists.has(current.artist));
-  if (b) b.classList.toggle("on", favoriteAlbums.has(albumKey(current.artist, current.album)));
+  const artistOn = trackArtists(current).some((s) => favoriteArtists.has(s));
+  if (a) a.classList.toggle("on", artistOn);
+  if (b) b.classList.toggle("on", favoriteAlbums.has(albumKey(albumOwner(current), current.album)));
 }
 
 async function toggleFavorite(payload, { withLike = true } = {}) {
@@ -397,6 +653,9 @@ async function toggleFavorite(payload, { withLike = true } = {}) {
       ? { type: "track", track_id: Number(payload) }
       : payload;
   if (!body.type) body.type = "track";
+  if (body.type === "artist" || body.type === "album") {
+    body.artist = String(body.artist || "").trim();
+  }
   const data = await api("/api/favorites/toggle", {
     method: "POST",
     body: JSON.stringify(body),
@@ -409,12 +668,15 @@ async function toggleFavorite(payload, { withLike = true } = {}) {
     toast(data.favorited ? "Любимая песня" : "Песня убрана из любимых");
     if (data.favorited && withLike) postEvent("like").catch(() => {});
   } else if (data.type === "artist" || body.type === "artist") {
-    const name = data.artist || body.artist;
+    const name = String(data.artist || body.artist || "").trim();
     if (data.favorited) favoriteArtists.add(name);
     else favoriteArtists.delete(name);
     toast(data.favorited ? "Любимый артист" : "Артист убран");
   } else if (data.type === "album" || body.type === "album") {
-    const key = albumKey(data.artist || body.artist, data.album || body.album);
+    const key = albumKey(
+      String(data.artist || body.artist || "").trim(),
+      data.album || body.album
+    );
     if (data.favorited) favoriteAlbums.add(key);
     else favoriteAlbums.delete(key);
     toast(data.favorited ? "Любимый альбом" : "Альбом убран");
@@ -429,20 +691,23 @@ function groupCatalog(tracks) {
   const artists = new Map();
   const albums = new Map();
   for (const t of tracks) {
-    const artist = (t.artist || "Unknown").trim() || "Unknown";
-    if (!artists.has(artist)) {
-      artists.set(artist, { artist, tracks: 0, cover: t.artwork || null, sampleId: t.id });
+    const segments = trackArtists(t);
+    for (const artist of segments.length ? segments : ["Unknown"]) {
+      if (!artists.has(artist)) {
+        artists.set(artist, { artist, tracks: 0, cover: t.artwork || null, sampleId: t.id });
+      }
+      const a = artists.get(artist);
+      a.tracks += 1;
+      if (!a.cover && t.artwork) a.cover = t.artwork;
     }
-    const a = artists.get(artist);
-    a.tracks += 1;
-    if (!a.cover && t.artwork) a.cover = t.artwork;
 
     const album = (t.album || "").trim();
     if (!album) continue;
-    const key = artist + "\0" + album;
+    const albumArtist = albumOwner(t) || "Unknown";
+    const key = albumArtist + "\0" + album;
     if (!albums.has(key)) {
       albums.set(key, {
-        artist,
+        artist: albumArtist,
         album,
         tracks: 0,
         cover: t.artwork || null,
@@ -457,6 +722,45 @@ function groupCatalog(tracks) {
     artists: sortArtists([...artists.values()], "tracks"),
     albums: sortAlbums([...albums.values()], "tracks"),
   };
+}
+
+const GAME_ALBUM_RE = /(^|[^a-zа-я])(o\.?s\.?t\.?|soundtrack|sound track|original (game )?score|game music|саундтрек)([^a-zа-я]|$)/i;
+
+// Server flag `game` (files under "Steam OST" / "GOG OST") is the source of truth;
+// the title check only helps albums added some other way.
+let gameAlbumKeys = new Set();
+
+function isGameAlbum(al) {
+  return !!al.game || gameAlbumKeys.has(albumKey(al.artist, al.album)) || GAME_ALBUM_RE.test(al.album || "");
+}
+
+// Soundtracks credit a different artist on almost every track, so artist+album grouping
+// splits one game into many cards. Merge game albums by title; artist "" plays the whole album.
+function mergeGameAlbums(albums) {
+  const by = new Map();
+  for (const al of albums) {
+    const key = (al.album || "").trim().toLowerCase();
+    const g = by.get(key);
+    if (!g) {
+      by.set(key, { ...al, artists: new Set([al.artist]) });
+      continue;
+    }
+    g.tracks = (g.tracks || 0) + (al.tracks || 0);
+    g.artists.add(al.artist);
+    if (!g.cover && al.cover) g.cover = al.cover;
+    if (!g.artwork && al.artwork) g.artwork = al.artwork;
+    g.game = g.game || al.game;
+  }
+  return [...by.values()]
+    .map(({ artists, ...g }) => (artists.size > 1 ? { ...g, artist: "", artistLabel: "разные исполнители" } : g))
+    .sort((a, b) => (b.tracks || 0) - (a.tracks || 0));
+}
+
+async function loadGameAlbumKeys() {
+  const res = await api("/api/albums?limit=500");
+  const albums = res.albums || [];
+  gameAlbumKeys = new Set(albums.filter((a) => a.game).map((a) => albumKey(a.artist, a.album)));
+  return albums;
 }
 
 function cmpText(a, b) {
@@ -493,6 +797,12 @@ function sortAlbums(list, sort) {
 }
 
 function catalogSortOptions(tab) {
+  if (tab === "artist-page") {
+    return [
+      ["album", "по альбому"],
+      ["title", "по песне"],
+    ];
+  }
   if (tab === "artists") {
     return [
       ["name", "по имени"],
@@ -525,13 +835,21 @@ function fillSortSelect(el, tab, current) {
 
 function tracksOfArtist(artist) {
   const name = (artist || "Unknown").trim() || "Unknown";
-  return library.filter((t) => ((t.artist || "Unknown").trim() || "Unknown") === name);
+  return library.filter((t) =>
+    trackArtists(t).some((seg) => seg.toLowerCase() === name.toLowerCase())
+  );
 }
 
 function tracksOfAlbum(artist, album) {
-  const a = (artist || "").trim();
+  const a = (artist || "").trim().toLowerCase();
   const al = (album || "").trim();
-  return library.filter((t) => (t.artist || "").trim() === a && (t.album || "").trim() === al);
+  // artist "" = a merged soundtrack album: every artist on it
+  return library.filter((t) => {
+    if ((t.album || "").trim() !== al) return false;
+    if (!a) return true;
+    if (String(t.album_artist || "").trim().toLowerCase() === a) return true;
+    return trackArtists(t).some((seg) => seg.toLowerCase() === a);
+  });
 }
 
 function coverImgHTML(src, width = 256, height = 256) {
@@ -539,18 +857,48 @@ function coverImgHTML(src, width = 256, height = 256) {
   return `<img src="${escapeHtml(src)}" alt="" width="${width}" height="${height}" loading="lazy" decoding="async" onerror="this.remove()">`;
 }
 
+// Stable hue per name, so a cover-less album still gets its own colour tile.
+function coverHue(name) {
+  let h = 0;
+  for (const ch of String(name || "")) h = (h * 31 + ch.codePointAt(0)) % 360;
+  return h;
+}
+
+function letterTileHTML(name) {
+  const first = escapeHtml((name || "♪").slice(0, 1).toUpperCase());
+  return `<div class="letter" style="--cover-h:${coverHue(name)}">${first}</div>`;
+}
+
 function entityCoverHtml(cover, letter, round) {
   if (cover) {
     return `<div class="entity-art${round ? " round" : ""}">${coverImgHTML(thumbURL(cover, 256))}</div>`;
   }
-  return `<div class="letter">${escapeHtml((letter || "♪").slice(0, 1).toUpperCase())}</div>`;
+  return letterTileHTML(letter);
+}
+
+// Artist photos found online (musik artist-photos): normalized name -> URL.
+let artistPhotos = new Map();
+
+function artistKey(name) {
+  return String(name || "").trim().split(/\s+/).join(" ").toLowerCase();
+}
+
+function artistPhoto(name) {
+  return artistPhotos.get(artistKey(name)) || "";
+}
+
+async function loadArtistPhotos() {
+  try {
+    const data = await api("/api/artist-photos");
+    artistPhotos = new Map(Object.entries(data?.photos || {}));
+  } catch (_) {}
 }
 
 function tileArtHTML(cover, letter) {
   if (cover) {
     return `<div class="tile-art">${coverImgHTML(thumbURL(cover, 256))}</div>`;
   }
-  return `<div class="letter">${escapeHtml((letter || "♪").slice(0, 1))}</div>`;
+  return letterTileHTML(letter);
 }
 
 function setCoverImg(img, src, host) {
@@ -601,10 +949,101 @@ function setPlayIcon(playing) {
   const icon = playing ? PAUSE_ICON : PLAY_ICON;
   $("btn-play").innerHTML = icon;
   $("mini-play").innerHTML = icon;
+  if ("mediaSession" in navigator) {
+    try {
+      navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+    } catch (_) {}
+  }
+}
+
+function trackArtAbsolute(t, width = 512) {
+  const raw = t?.artwork || (t?.id ? `/api/artwork/${t.id}` : "");
+  if (!raw) return "";
+  try {
+    return new URL(thumbURL(raw, width), location.href).href;
+  } catch (_) {
+    return raw;
+  }
+}
+
+// Push the now-playing track to the OS (lock screen / notification / headset).
+function updateMediaSession(track) {
+  if (!("mediaSession" in navigator)) return;
+  try {
+    if (!track) {
+      navigator.mediaSession.metadata = null;
+      return;
+    }
+    const art = trackArtAbsolute(track, 512);
+    const meta = {
+      title: track.title || "#" + (track.id || ""),
+      artist: track.artist || "",
+      album: track.album || "",
+    };
+    if (art) meta.artwork = [{ src: art, sizes: "512x512", type: "image/jpeg" }];
+    if (typeof MediaMetadata !== "undefined") {
+      navigator.mediaSession.metadata = new MediaMetadata(meta);
+    }
+  } catch (_) {}
+}
+
+function updatePositionState() {
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+  const audio = $("audio");
+  if (!audio || !audio.duration || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: audio.duration,
+      playbackRate: audio.playbackRate || 1,
+      position: Math.max(0, Math.min(audio.currentTime, audio.duration)),
+    });
+  } catch (_) {}
+}
+
+function wireMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const ms = navigator.mediaSession;
+  const guard = (fn) => (...args) => {
+    try {
+      const r = fn(...args);
+      if (r && r.catch) r.catch(() => {});
+    } catch (_) {}
+  };
+  const set = (action, fn) => {
+    try {
+      ms.setActionHandler(action, guard(fn));
+    } catch (_) {}
+  };
+  set("play", () => {
+    if ($("audio").paused) togglePlay();
+  });
+  set("pause", () => {
+    if (!$("audio").paused) togglePlay();
+  });
+  set("previoustrack", () => backTrack());
+  set("nexttrack", () => skipTrack());
+  set("seekto", (d) => {
+    const audio = $("audio");
+    if (!d || typeof d.seekTime !== "number" || !Number.isFinite(d.seekTime)) return;
+    const t = Math.max(0, Math.min(d.seekTime, audio.duration || d.seekTime));
+    if (d.fastSeek && typeof audio.fastSeek === "function") audio.fastSeek(t);
+    else audio.currentTime = t;
+    updatePositionState();
+  });
+  set("seekbackward", (d) => {
+    const audio = $("audio");
+    audio.currentTime = Math.max(0, audio.currentTime - ((d && d.seekOffset) || 10));
+  });
+  set("seekforward", (d) => {
+    const audio = $("audio");
+    const step = (d && d.seekOffset) || 10;
+    audio.currentTime = Math.min(audio.duration || audio.currentTime + step, audio.currentTime + step);
+  });
 }
 
 function updateMini(track) {
   const mini = $("mini");
+  document.body.classList.toggle("has-mini", !!track);
   if (!track) {
     mini.hidden = true;
     return;
@@ -620,7 +1059,8 @@ function applyPlayPayload(data, { autoplay = true } = {}) {
   if (data.maturity) renderMaturity(data.maturity);
   fixedMode = !!data.fixed || (Array.isArray(data.tracks) && data.tracks.length > 0);
   if (data.name || data.mode) {
-    $("mode-label").textContent = data.name || data.mode || "";
+    const MODE_LABELS = { radio: "Играет радио", fixed: "Играет подборка" };
+    $("mode-label").textContent = data.name || MODE_LABELS[data.mode] || data.mode || "";
   }
   if (Array.isArray(data.tracks)) {
     playlist = data.tracks;
@@ -635,17 +1075,16 @@ function applyPlayPayload(data, { autoplay = true } = {}) {
   }
   if (data.current) {
     if (autoplay) renderNow(data.current);
-    else {
-      current = data.current;
-      updateMini(data.current);
-      $("title").textContent = data.current.title || "—";
-      $("artist").textContent = [data.current.artist, data.current.album].filter(Boolean).join(" · ");
-      setNowSource(data.current.source);
-    }
+    // Restoring: load the track paused and do not announce a new listen.
+    else renderNow(data.current, { autoplay: false, announce: false });
   }
 }
 
-function renderNow(track) {
+// autoplay=false loads the track paused (resume after reload / from another
+// device); startAt and listened restore the position and the listened time so
+// the eventual track_end reports the whole listen; announce=false skips
+// track_start because that listen was already started elsewhere.
+function renderNow(track, { autoplay = true, startAt = 0, listened = 0, announce = true } = {}) {
   current = track;
   const art = $("art");
   if (!track) {
@@ -655,6 +1094,7 @@ function renderNow(track) {
     setCoverImg($("art-img"), "", art);
     setNowSource("");
     updateMini(null);
+    updateMediaSession(null);
     setPlayIcon(false);
     return;
   }
@@ -668,6 +1108,9 @@ function renderNow(track) {
     setCoverImg($("art-img"), "", art);
   }
   updateMini(track);
+  renderWhy(track);
+  applyCoverAccent(track);
+  updateMediaSession(track);
   const audio = $("audio");
   const url = track.stream || `/api/stream/${track.id}`;
   if (audio.dataset.trackId !== String(track.id)) {
@@ -675,23 +1118,206 @@ function renderNow(track) {
     audio.dataset.trackId = String(track.id);
     audio.dataset.gen = String(gen);
     audio.src = url;
-    audio.play().then(() => setPlayIcon(true)).catch(() => setPlayIcon(false));
-    listenedAccum = 0;
-    lastPos = 0;
-    $("seek").value = 0;
-    setSeekPct(0);
-    $("time-cur").textContent = "0:00";
-    $("time-dur").textContent = fmtTime(track.duration || 0);
+    const at = Math.max(0, Number(startAt) || 0);
+    if (at > 0) {
+      audio.addEventListener(
+        "loadedmetadata",
+        () => {
+          if (audio.dataset.gen !== String(gen)) return;
+          // lastPos first, so timeupdate does not count the jump as listening.
+          lastPos = Math.min(at, audio.duration || at);
+          audio.currentTime = lastPos;
+        },
+        { once: true }
+      );
+    }
+    if (autoplay) audio.play().then(() => setPlayIcon(true)).catch(() => setPlayIcon(false));
+    else setPlayIcon(false);
+    listenedAccum = Math.max(0, Number(listened) || 0);
+    lastPos = at;
+    const dur = track.duration || 0;
+    const pctAt = dur > 0 ? (at / dur) * 100 : 0;
+    $("seek").value = Math.round(pctAt * 10);
+    setSeekPct(pctAt);
+    $("time-cur").textContent = fmtTime(at);
+    $("time-dur").textContent = fmtTime(dur);
     setRatingUI(null);
     setFavoriteUI(favoriteIds.has(track.id));
     setEntityFavChips();
-    postEvent("track_start", { track_id: track.id }).catch(() => {});
+    if (announce) postEvent("track_start", { track_id: track.id }).catch(() => {});
     loadLyrics(track.id);
+    loadPassport(track.id);
   } else {
     setFavoriteUI(favoriteIds.has(track.id));
     setEntityFavChips();
   }
   highlightPlaylist(track.id);
+}
+
+// ---------- now playing: passport, "why", colour from the cover ----------
+
+function keyLabel(key, mode) {
+  if (!key) return "";
+  return mode ? `${key} ${mode === "minor" ? "minor" : "major"}` : key;
+}
+
+async function loadPassport(trackId) {
+  const box = $("now-passport");
+  if (!box) return;
+  box.innerHTML = "";
+  try {
+    const t = await api(`/api/tracks/${trackId}`);
+    if (current?.id !== trackId || !t?.passport) return;
+    const p = t.passport;
+    const chips = [];
+    if (p.format) chips.push(p.bitrate ? `${p.format} · ${Math.round(p.bitrate / 1000)} кбит/с` : p.format);
+    if (p.sample_rate) chips.push(`${(p.sample_rate / 1000).toFixed(p.sample_rate % 1000 ? 1 : 0)} кГц`);
+    if (p.bpm) chips.push(`${Math.round(p.bpm)} BPM`);
+    if (p.key) chips.push(keyLabel(p.key, p.mode));
+    if (p.lufs != null) chips.push(`${p.lufs.toFixed(0).replace("-", "−")} LUFS`);
+    box.innerHTML = chips.map((c) => `<span>${escapeHtml(c)}</span>`).join("");
+  } catch {
+    /* passport is decorative; ignore */
+  }
+}
+
+// Ranker features that read as "reasons" when high (see queue.FeatureNames).
+const queueFeatures = new Map();
+
+const WHY_FEATURES = [
+  ["sim_taste", "похоже на твой вкус"],
+  ["sim_current", "звучит как предыдущий трек"],
+  ["sim_session", "в духе этой сессии"],
+  ["sim_mood", "под выбранное настроение"],
+  ["sim_activity", "под занятие"],
+  ["sim_place", "под место"],
+  ["sim_daypart", "подходит ко времени суток"],
+  ["sim_centroid_max", "рядом с одним из твоих «островов» вкуса"],
+  ["transition_score", "часто звучит после этого"],
+];
+
+function parseFeatures(item) {
+  try {
+    const f = typeof item?.features_json === "string" ? JSON.parse(item.features_json) : item?.features_json;
+    if (!f?.names || !f?.values) return null;
+    const out = {};
+    f.names.forEach((n, i) => (out[n] = f.values[i]));
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function setQueueWhy(text) {
+  const el = $("queue-why");
+  if (!el) return;
+  el.hidden = !text;
+  el.innerHTML = text || "";
+}
+
+function renderWhy(item) {
+  const box = $("now-why");
+  if (!box) return;
+  const remembered = queueFeatures.get(item?.id || item?.track_id);
+  const source = sourceLabel(item?.source || remembered?.source);
+  const f = parseFeatures(item) || parseFeatures(remembered);
+  if (!f) {
+    const lead = fixedMode
+      ? "Ты выбрал это сам — микс, альбом или плейлист."
+      : item?.source === "radio_start"
+        ? "С этого трека радио стартовало. Следующие подбираются от него и от твоего вкуса — открой «Почему» на них."
+        : `Радио: ${source || "подбор"}.`;
+    box.innerHTML = `<p class="np-why-lead">${escapeHtml(lead)}</p>`;
+    setQueueWhy(fixedMode ? "" : escapeHtml(lead));
+    return;
+  }
+  const bars = WHY_FEATURES.map(([k, label]) => [label, Math.max(0, Math.min(1, f[k] || 0))])
+    .filter(([, v]) => v >= 0.05)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4);
+  const flags = [];
+  if (bars.length) {
+    const top = bars.slice(0, 2).map(([label]) => label);
+    setQueueWhy(`Этот трек: <strong>${escapeHtml(top.join(" и "))}</strong>. Следом радио подмешает немного нового.`);
+  } else setQueueWhy("");
+  if (f.key_compat > 0) flags.push("совместим по тональности");
+  if (!f.bpm_missing && f.bpm_distance < 0.1) flags.push("близкий темп");
+  if (f.never_played > 0) flags.push("ещё ни разу не звучал");
+  if (f.new_boost > 0) flags.push("новое в библиотеке");
+  box.innerHTML = `
+    <p class="np-why-lead">Радио: <strong>${escapeHtml(source || "подбор")}</strong>. Вот что сработало сильнее всего:</p>
+    ${bars
+      .map(
+        ([label, v]) => `<div class="taste-row"><span>${escapeHtml(label)}</span><span class="taste-pct">${Math.round(v * 100)}%</span>
+          <div class="taste-bar"><i style="width:${Math.round(v * 100)}%"></i></div></div>`
+      )
+      .join("")}
+    ${flags.length ? `<div class="np-why-flags">${flags.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
+    <p class="np-why-note">Жми «Больше такого» или «Не то» — это сразу меняет вкус радио.</p>`;
+}
+
+// Accent colour follows the cover: average the artwork, keep it readable on dark.
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, sat = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    sat = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h *= 60;
+  }
+  return [h, sat, l];
+}
+
+function setAccentHue(h, sat = 0.62) {
+  const root = document.documentElement.style;
+  const s = Math.round(Math.max(0.35, Math.min(0.75, sat)) * 100);
+  root.setProperty("--accent", `hsl(${Math.round(h)} ${s}% 60%)`);
+  root.setProperty("--np-tint", `hsl(${Math.round(h)} ${Math.round(s * 0.45)}% 11%)`);
+  root.setProperty("--np-cover", `hsl(${Math.round(h)} ${Math.round(s * 0.5)}% 26%)`);
+}
+
+function applyCoverAccent(track) {
+  const fallback = () => setAccentHue(coverHue(track.album || track.title || ""));
+  const img = $("art-img");
+  if (!track.artwork || !img) return fallback();
+  const sample = () => {
+    try {
+      const c = document.createElement("canvas");
+      c.width = c.height = 16;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, 16, 16);
+      const d = ctx.getImageData(0, 0, 16, 16).data;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const [, sat, l] = rgbToHsl(d[i], d[i + 1], d[i + 2]);
+        if (l < 0.08 || l > 0.92) continue; // ignore black/white borders
+        const w = 0.2 + sat;                   // colourful pixels count more
+        r += d[i] * w; g += d[i + 1] * w; b += d[i + 2] * w; n += w;
+      }
+      if (!n) return fallback();
+      const [h, sat] = rgbToHsl(r / n, g / n, b / n);
+      setAccentHue(h, sat);
+    } catch {
+      fallback();
+    }
+  };
+  if (img.complete && img.naturalWidth) sample();
+  else {
+    img.addEventListener("load", sample, { once: true });
+    img.addEventListener("error", fallback, { once: true });
+  }
+}
+
+function setNowTab(tab) {
+  document.querySelectorAll(".np-tab").forEach((b) => {
+    const on = b.dataset.npTab === tab;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+  });
+  document.querySelectorAll("[data-np-pane]").forEach((p) => (p.hidden = p.dataset.npPane !== tab));
 }
 
 async function loadLyrics(trackId) {
@@ -730,6 +1356,14 @@ function queueRowHTML(t, i, { why = false, now = false } = {}) {
   const art = trackArtURL(t);
   const letter = escapeHtml((t.title || t.artist || "?").slice(0, 1).toUpperCase());
   const reason = why ? whyLabel(t) : "";
+  const numId = Number(id);
+  const rated = trackRatings.get(numId);
+  const rate = id
+    ? `<span class="row-rate">
+        <span class="rate-btn like${favoriteIds.has(numId) ? " on" : ""}" data-rate="like" role="button" tabindex="0" aria-label="Нравится" title="Нравится">♥</span>
+        <span class="rate-btn dislike${rated === "dislike" ? " on" : ""}" data-rate="dislike" role="button" tabindex="0" aria-label="Не нравится" title="Не нравится">♥</span>
+      </span>`
+    : "";
   return `
     <span class="q-art" data-letter="${letter}">${
       art ? `<img src="${escapeHtml(art)}" alt="" width="96" height="96" loading="lazy" decoding="async" onerror="this.remove()">` : ""
@@ -742,13 +1376,63 @@ function queueRowHTML(t, i, { why = false, now = false } = {}) {
       </span>
     </span>
     <span class="dur">${fmtTime(t.duration || 0)}</span>
-    <span class="pos">${now ? "▶" : i + 1}</span>`;
+    <span class="pos">${now ? "▶" : i + 1}</span>
+    ${rate}`;
+}
+
+function bindRowRate(btn, trackId) {
+  btn.querySelectorAll(".rate-btn").forEach((el) => {
+    const stop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    el.addEventListener("pointerdown", stop);
+    el.addEventListener("click", (e) => {
+      stop(e);
+      rateTrack(Number(trackId), el.dataset.rate).catch(() => {});
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        stop(e);
+        rateTrack(Number(trackId), el.dataset.rate).catch(() => {});
+      }
+    });
+  });
+}
+
+async function rateTrack(trackId, type) {
+  if (!trackId) return;
+  if (type === "like") {
+    await toggleFavorite({ type: "track", track_id: trackId }, { withLike: false });
+    trackRatings.set(trackId, "like");
+  } else {
+    if (!sessionId) toast("Сначала запусти трек");
+    trackRatings.set(trackId, "dislike");
+    postEvent("dislike", { track_id: trackId }).catch(() => {});
+  }
+  refreshRatedRows(trackId);
+}
+
+function refreshRatedRows(trackId) {
+  document.querySelectorAll(`.playlist-item[data-track-id="${trackId}"]`).forEach((btn) => {
+    const rated = trackRatings.get(Number(trackId));
+    btn.querySelector(".rate-btn.like")?.classList.toggle("on", favoriteIds.has(Number(trackId)));
+    btn.querySelector(".rate-btn.dislike")?.classList.toggle("on", rated === "dislike");
+  });
 }
 
 function renderQueue(queue) {
   const ol = $("queue");
   ol.innerHTML = "";
   const list = queue || [];
+  // The server drops features_json once a queued track becomes current; keep them for "Почему".
+  list.forEach((q) => {
+    const id = q.track_id || q.id;
+    if (id && q.features_json) queueFeatures.set(id, { source: q.source, features_json: q.features_json });
+  });
+  currentQueue = list;
+  queueKind = "queue";
+  updateQueueOpenButton();
   $("playlist-label").textContent = "Дальше в радио";
   setQueueHint("Нажми песню — сразу она");
   $("queue-count").textContent = list.length ? `${list.length}` : "";
@@ -761,6 +1445,7 @@ function renderQueue(queue) {
     if (id) btn.dataset.trackId = String(id);
     btn.innerHTML = queueRowHTML(q, i, { why: true });
     bindTrackButton(btn, () => jumpTo(id, i).catch((e) => toast(e.message || String(e))));
+    bindRowRate(btn, id);
     li.appendChild(btn);
     ol.appendChild(li);
   });
@@ -770,6 +1455,9 @@ function renderPlaylist(tracks, currentIndex) {
   const ol = $("playlist");
   ol.innerHTML = "";
   const list = tracks || [];
+  currentQueue = list;
+  queueKind = "playlist";
+  updateQueueOpenButton();
   $("playlist-label").textContent = "В этом списке";
   setQueueHint("Нажми песню — сразу она");
   $("queue-count").textContent = list.length ? `${list.length}` : "";
@@ -784,9 +1472,50 @@ function renderPlaylist(tracks, currentIndex) {
     if (now) btn.classList.add("current");
     btn.innerHTML = queueRowHTML(t, i, { now });
     bindTrackButton(btn, () => jumpTo(id, t.position ?? i).catch((e) => toast(e.message || String(e))));
+    bindRowRate(btn, id);
     li.appendChild(btn);
     ol.appendChild(li);
   });
+}
+
+function updateQueueOpenButton() {
+  const btn = $("btn-queue-open");
+  if (!btn) return;
+  btn.hidden = currentQueue.length === 0;
+  btn.textContent = queueKind === "playlist" ? "Список" : "Дальше в радио";
+}
+
+function openQueueModal() {
+  const modal = $("queue-modal");
+  const list = $("queue-modal-list");
+  if (!modal || !list) return;
+  $("queue-modal-title").textContent =
+    queueKind === "playlist" ? "В этом списке" : "Дальше в радио";
+  list.innerHTML = "";
+  currentQueue.forEach((t, i) => {
+    const id = t.track_id || t.id;
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "playlist-item";
+    if (id) btn.dataset.trackId = String(id);
+    const isNow = !!(current && id === current.id);
+    if (isNow) btn.classList.add("current");
+    btn.innerHTML = queueRowHTML(t, i, { why: queueKind === "queue", now: isNow });
+    bindTrackButton(btn, () => {
+      closeQueueModal();
+      jumpTo(id, t.position ?? i).catch((e) => toast(e.message || String(e)));
+    });
+    bindRowRate(btn, id);
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+  modal.hidden = false;
+}
+
+function closeQueueModal() {
+  const modal = $("queue-modal");
+  if (modal) modal.hidden = true;
 }
 
 function highlightPlaylist(trackId) {
@@ -1018,7 +1747,7 @@ function renderEntityShelf(el, items, kind) {
       const on = favoriteArtists.has(item.artist);
       btn.className = "mix-card entity-card artist-card";
       btn.innerHTML = `
-        ${entityCoverHtml(item.cover || item.artwork, item.artist, true)}
+        ${entityCoverHtml(artistPhoto(item.artist) || item.cover || item.artwork, item.artist, true)}
         <strong>${escapeHtml(item.artist)}</strong>
         <span>артист</span>
         <div class="mix-meta">${item.tracks} треков</div>`;
@@ -1029,15 +1758,14 @@ function renderEntityShelf(el, items, kind) {
           )
         )
       );
-      btn.onclick = () =>
-        playFixed({ artist: item.artist }).catch((e) => toast(e.message || String(e)));
+      btn.onclick = () => openArtist(item.artist);
     } else if (kind === "album") {
       const on = favoriteAlbums.has(albumKey(item.artist, item.album));
       btn.className = "mix-card entity-card";
       btn.innerHTML = `
         ${entityCoverHtml(item.cover || item.artwork, item.album)}
         <strong>${escapeHtml(item.album)}</strong>
-        <span>${escapeHtml(item.artist)}</span>
+        <span>${escapeHtml(item.artistLabel || item.artist)}</span>
         <div class="mix-meta">${item.tracks || ""} ${item.explanation ? "" : "треков"}</div>
         ${item.explanation ? `<div class="why-line">${escapeHtml(item.explanation)}</div>` : ""}`;
       btn.appendChild(
@@ -1235,12 +1963,82 @@ async function loadHomeCatalog() {
   await favsP;
   renderEntityShelf($("home-artists"), artistsRes.artists || [], "artist");
   renderEntityShelf($("home-albums"), albumsRes.albums || [], "album");
+  loadGamesShelf().catch(console.error);
+  loadHomeHero().catch(console.error);
   renderEntityShelf($("home-tracks"), Array.isArray(tracks) ? tracks : [], "track");
   homeHydrated = true;
   wireAllShelves();
   loadHomeFavorites().catch(console.error);
   loadSimilarRecs().catch(console.error);
   ensureLibrary().catch(console.error);
+}
+
+async function loadGamesShelf() {
+  const games = mergeGameAlbums((await loadGameAlbumKeys()).filter(isGameAlbum));
+  const section = $("games-shelf");
+  if (section) section.hidden = !games.length;
+  renderEntityShelf($("home-games"), games, "album");
+}
+
+const HOME_MOODS = ["Фокус", "Эпик", "Ночь", "Джаз", "Спокойно"];
+
+async function startMood(name, btn) {
+  btn?.classList.add("busy");
+  try {
+    const list = (await api("/api/contexts")).contexts || [];
+    let ctx = list.find((c) => (c.name || "").toLowerCase() === name.toLowerCase());
+    if (!ctx) {
+      ctx = await api("/api/contexts", {
+        method: "POST",
+        body: JSON.stringify({ name, kind: "mood", influence: 1, learning_enabled: true }),
+      });
+    }
+    await startRadio();
+    if (sessionId && ctx?.context_id) {
+      await api(`/api/contexts/${ctx.context_id}/activate`, {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+    }
+    toast(`Радио: ${name}`);
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    btn?.classList.remove("busy");
+  }
+}
+
+async function loadHomeHero() {
+  const moods = $("home-moods");
+  if (moods && !moods.childElementCount) {
+    HOME_MOODS.forEach((name) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "mood-chip";
+      b.textContent = name;
+      b.onclick = () => startMood(name, b);
+      moods.appendChild(b);
+    });
+  }
+  const box = $("home-taste");
+  if (!box) return;
+  const p = await api("/api/profile");
+  const top = (p.top_artists || []).slice(0, 4);
+  const total = top.reduce((n, a) => n + (a.count || 0), 0);
+  if (!total) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML =
+    `<div class="taste-kicker">Сейчас в профиле</div>` +
+    top
+      .map((a) => {
+        const pctv = Math.round((100 * a.count) / total);
+        return `<div class="taste-row"><span>${escapeHtml(a.artist)}</span><span class="taste-pct">${pctv}%</span>
+          <div class="taste-bar"><i style="width:${pctv}%"></i></div></div>`;
+      })
+      .join("");
 }
 
 async function showTips(kind) {
@@ -1284,21 +2082,26 @@ function setLibTab(tab) {
   const ph = $("lib-filter");
   if (ph) {
     ph.placeholder =
-      tab === "artists"
+      tab === "artists" && libArtist
+        ? "Поиск по трекам артиста…"
+        : tab === "artists"
         ? "Поиск артиста…"
         : tab === "albums"
           ? "Поиск альбома…"
+          : tab === "games"
+            ? "Поиск игры…"
           : tab === "favorites"
             ? "Поиск в избранном…"
             : "Артист, трек, альбом…";
   }
-  libSort = fillSortSelect($("lib-sort"), tab, libSort);
+  libSort = fillSortSelect($("lib-sort"), tab === "games" ? "albums" : tab === "artists" && libArtist ? "artist-page" : tab, libSort);
   renderLib(ph?.value || "");
 }
 
 async function loadLibrary() {
+  if (!gameAlbumKeys.size) await loadGameAlbumKeys().catch(() => {});
   library = await api("/api/library");
-  await loadFavorites();
+  await Promise.all([loadFavorites(), loadArtistPhotos()]);
   const { artists, albums } = groupCatalog(library);
   $("lib-count").textContent = `${library.length} треков · ${artists.length} артистов · ${albums.length} альбомов · ${favoriteIds.size} ♥`;
   setLibTab(libTab);
@@ -1309,6 +2112,12 @@ function renderLib(q) {
   const ul = $("lib-list");
   const grid = $("lib-grid");
   if (!ul || !grid) return;
+  const artistPage = libTab === "artists" && !!libArtist;
+  $("lib-artist-head").hidden = !artistPage;
+  if (artistPage) {
+    renderArtistPage(qq);
+    return;
+  }
 
   if (libTab === "tracks" || libTab === "favorites") {
     ul.hidden = false;
@@ -1326,59 +2135,13 @@ function renderLib(q) {
       ul.innerHTML = '<li class="sub" style="padding:.8rem 0">Избранное пусто — жми ♥ в плеере</li>';
       return;
     }
-    sortTracks(
-      source.filter((t) => !qq || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(qq)),
-      libSort
-    )
-      .slice(0, 400)
-      .forEach((t) => {
-        const li = document.createElement("li");
-        li.className = "track-row";
-        const isFav = favoriteIds.has(t.id);
-        li.innerHTML = `
-          <button type="button" class="linkish">${isFav ? "♥ " : ""}${t.ready === false ? "… " : ""}${escapeHtml(t.artist)} — ${escapeHtml(t.title)}</button>
-          <span class="dur">${fmtTime(t.duration || 0)}</span>
-          <span class="row-actions">
-            <button type="button" class="tiny" data-act="track">Трек</button>
-            <button type="button" class="tiny" data-act="fav">${isFav ? "Убрать ♥" : "♥"}</button>
-            <button type="button" class="tiny" data-act="album">Альбом</button>
-            <button type="button" class="tiny" data-act="artist">Артист</button>
-            <button type="button" class="tiny" data-act="later">Потом</button>
-            <button type="button" class="tiny" data-act="playlist">Плейлист</button>
-            <button type="button" class="tiny" data-act="radio">Радио</button>
-          </span>`;
-        li.querySelector(".linkish").onclick = () =>
-          playFixed({ track_id: t.id, name: t.title }).catch((e) => toast(e.message || String(e)));
-        li.querySelectorAll("[data-act]").forEach((btn) => {
-          btn.onclick = async (e) => {
-            e.stopPropagation();
-            const act = btn.dataset.act;
-            try {
-              if (act === "track") await playFixed({ track_id: t.id, name: t.title });
-              else if (act === "fav") {
-                await toggleFavorite({ type: "track", track_id: t.id }, { withLike: false });
-                renderLib($("lib-filter").value || "");
-              } else if (act === "album") {
-                if (!t.album) return toast("У трека нет альбома");
-                await playFixed({ artist: t.artist, album: t.album });
-              } else if (act === "artist") {
-                if (!t.artist) return toast("Нет артиста");
-                await playFixed({ artist: t.artist });
-              } else if (act === "later") {
-                await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: t.id }) });
-                toast("В «Потом»");
-              } else if (act === "playlist") {
-                await pickPlaylistForTrack(t.id);
-              } else if (act === "radio") {
-                await startRadio(t.id);
-              }
-            } catch (err) {
-              toast(err.message || String(err));
-            }
-          };
-        });
-        ul.appendChild(li);
-      });
+    renderTrackRows(
+      ul,
+      sortTracks(
+        source.filter((t) => !qq || `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(qq)),
+        libSort
+      ).slice(0, 400)
+    );
     return;
   }
 
@@ -1397,11 +2160,11 @@ function renderLib(q) {
         btn.type = "button";
         btn.className = "lib-tile artist";
         btn.innerHTML = `
-          ${tileArtHTML(a.cover, a.artist)}
+          ${tileArtHTML(artistPhoto(a.artist) || a.cover, a.artist)}
           <strong>${escapeHtml(a.artist)}</strong>
           <span>${a.tracks} треков</span>
           <div class="mix-meta">
-            слушать
+            открыть
             <span class="tiny tile-pl" data-act="playlist">в плейлист</span>
           </div>`;
         btn.onclick = (e) => {
@@ -1412,24 +2175,32 @@ function renderLib(q) {
             );
             return;
           }
-          playFixed({ artist: a.artist }).catch((err) => toast(err.message || String(err)));
+          // Opening an artist only shows the tracks; playback is an explicit button.
+          openArtist(a.artist);
         };
         grid.appendChild(btn);
       });
     return;
   }
 
-  sortAlbums(
-    albums.filter((al) => !qq || `${al.artist} ${al.album}`.toLowerCase().includes(qq)),
+  const pool = libTab === "games" ? mergeGameAlbums(albums.filter(isGameAlbum)) : albums;
+  const shown = sortAlbums(
+    pool.filter((al) => !qq || `${al.artist} ${al.album}`.toLowerCase().includes(qq)),
     libSort
-  ).forEach((al) => {
+  );
+  if (libTab === "games" && !shown.length && !qq) {
+    grid.innerHTML =
+      '<p class="sub" style="padding:.8rem 0">Саундтреков пока нет. Купленные в Steam и GOG подтянутся сами.</p>';
+    return;
+  }
+  shown.forEach((al) => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "lib-tile";
       btn.innerHTML = `
         ${tileArtHTML(al.cover, al.album)}
         <strong>${escapeHtml(al.album)}</strong>
-        <span>${escapeHtml(al.artist)}</span>
+        <span>${escapeHtml(al.artistLabel || al.artist)}</span>
         <div class="mix-meta">
           ${al.tracks} треков
           <span class="tiny tile-pl" data-act="playlist">в плейлист</span>
@@ -1446,6 +2217,110 @@ function renderLib(q) {
       };
       grid.appendChild(btn);
     });
+}
+
+// Artist page inside the library: header with explicit play/radio buttons and
+// the artist's tracks. Nothing starts playing until the user picks something.
+function ruPlural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+function renderArtistPage(qq) {
+  const ul = $("lib-list");
+  const grid = $("lib-grid");
+  const tracks = tracksOfArtist(libArtist);
+  const albumCount = new Set(tracks.map((t) => (t.album || "").trim()).filter(Boolean)).size;
+  $("lib-artist-name").textContent = libArtist;
+  const photo = artistPhoto(libArtist);
+  const photoBox = $("lib-artist-photo");
+  photoBox.hidden = !photo;
+  photoBox.innerHTML = photo ? coverImgHTML(thumbURL(photo, 256), 256, 256) : "";
+  $("lib-artist-meta").textContent = `${tracks.length} ${ruPlural(tracks.length, "трек", "трека", "треков")}${albumCount ? ` · ${albumCount} ${ruPlural(albumCount, "альбом", "альбома", "альбомов")}` : ""}`;
+  grid.hidden = true;
+  grid.innerHTML = "";
+  ul.hidden = false;
+  ul.innerHTML = "";
+  if (!tracks.length) {
+    ul.innerHTML = '<li class="sub" style="padding:.8rem 0">У артиста нет треков в библиотеке</li>';
+    return;
+  }
+  renderTrackRows(
+    ul,
+    sortTracks(
+      tracks.filter((t) => !qq || `${t.title} ${t.album}`.toLowerCase().includes(qq)),
+      libSort
+    ),
+    { listName: libArtist }
+  );
+}
+
+function openArtist(name) {
+  libTab = "artists";
+  libArtist = name;
+  const filter = $("lib-filter");
+  if (filter) filter.value = "";
+  setView("library");
+  window.scrollTo(0, 0);
+}
+
+// listName: when set, clicking a title plays the whole shown list starting at
+// that track (artist page) instead of the single track.
+function renderTrackRows(ul, tracks, { listName = "" } = {}) {
+  const playRow = (t) =>
+    listName
+      ? playFixed({ track_ids: tracks.map((x) => x.id), start_track_id: t.id, name: listName })
+      : playFixed({ track_id: t.id, name: t.title });
+  tracks.forEach((t) => {
+    const li = document.createElement("li");
+    li.className = "track-row";
+    const isFav = favoriteIds.has(t.id);
+    li.innerHTML = `
+      <button type="button" class="linkish">${isFav ? "♥ " : ""}${t.ready === false ? "… " : ""}${escapeHtml(t.artist)} — ${escapeHtml(t.title)}</button>
+      <span class="dur">${fmtTime(t.duration || 0)}</span>
+      <span class="row-actions">
+        <button type="button" class="tiny" data-act="track">Трек</button>
+        <button type="button" class="tiny" data-act="fav">${isFav ? "Убрать ♥" : "♥"}</button>
+        <button type="button" class="tiny" data-act="album">Альбом</button>
+        <button type="button" class="tiny" data-act="artist">Артист</button>
+        <button type="button" class="tiny" data-act="later">Потом</button>
+        <button type="button" class="tiny" data-act="playlist">Плейлист</button>
+        <button type="button" class="tiny" data-act="radio">Радио</button>
+      </span>`;
+    li.querySelector(".linkish").onclick = () =>
+      playRow(t).catch((e) => toast(e.message || String(e)));
+    li.querySelectorAll("[data-act]").forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const act = btn.dataset.act;
+        try {
+          if (act === "track") await playFixed({ track_id: t.id, name: t.title });
+          else if (act === "fav") {
+            await toggleFavorite({ type: "track", track_id: t.id }, { withLike: false });
+            renderLib($("lib-filter").value || "");
+          } else if (act === "album") {
+            if (!t.album) return toast("У трека нет альбома");
+            await playFixed({ artist: t.artist, album: t.album });
+          } else if (act === "artist") {
+            if (!t.artist) return toast("Нет артиста");
+            await playFixed({ artist: t.artist });
+          } else if (act === "later") {
+            await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: t.id }) });
+            toast("В «Потом»");
+          } else if (act === "playlist") {
+            await pickPlaylistForTrack(t.id);
+          } else if (act === "radio") {
+            await startRadio(t.id);
+          }
+        } catch (err) {
+          toast(err.message || String(err));
+        }
+      };
+    });
+    ul.appendChild(li);
+  });
 }
 
 const SOURCE_LABELS = {
@@ -1495,6 +2370,450 @@ function setNowSource(source) {
 
 function pct(value) {
   return `${Math.round((Number(value) || 0) * 100)}%`;
+}
+
+// ---- Profile → Settings: listen address, music folder, phone connection ----
+// Values are saved to .env on the server and take effect after a restart; the
+// panel shows what is saved and offers the restart.
+let settingsData = null;
+let settingsDirPath = "";
+let settingsExternalIp = "";
+
+function escapeAttr(s) {
+  return escapeHtml(s).replace(/"/g, "&quot;");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    // http on a LAN address is not a secure context: no clipboard API there.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (_) {}
+    ta.remove();
+  }
+  toast("Скопировано");
+}
+
+function splitListenAddr(addr) {
+  const m = String(addr || "").match(/^(.*):(\d+)$/);
+  const host = m ? m[1] : "";
+  const port = m ? Number(m[2]) : 8787;
+  if (!host || host === "0.0.0.0" || host === "::") return { mode: "lan", host: "", port };
+  if (host === "127.0.0.1" || host === "localhost") return { mode: "local", host, port };
+  return { mode: "ip", host, port };
+}
+
+async function loadSettings() {
+  const box = $("settings-box");
+  if (!box || (multiUser && !account?.user?.roles?.includes("admin"))) return;
+  try {
+    settingsData = await api("/api/settings");
+  } catch (e) {
+    box.innerHTML = `
+      <div class="panel-kicker">сервер</div>
+      <strong>Настройки</strong>
+      <p class="sub">${escapeHtml(e.message || String(e))}</p>`;
+    return;
+  }
+  renderSettings();
+}
+
+function renderSettings() {
+  const box = $("settings-box");
+  const s = settingsData;
+  const saved = splitListenAddr(s.saved.addr);
+  const ips = s.local_ips || [];
+  const phone = s.phone || {};
+  box.innerHTML = `
+    <div class="panel-kicker">сервер</div>
+    <strong>Настройки</strong>
+    <div class="settings-banner" id="settings-pending" ${s.restart_pending ? "" : "hidden"}>
+      <span>Изменения сохранены и заработают после перезапуска сервера.</span>
+      <button type="button" class="btn primary" id="settings-restart">Перезапустить сервер</button>
+    </div>
+
+    <div class="settings-section">
+      <h3>Адрес сервера</h3>
+      <label class="settings-radio"><input type="radio" name="listen" value="lan"> Вся домашняя сеть — открывается с телефона по Wi-Fi</label>
+      <label class="settings-radio"><input type="radio" name="listen" value="internet"> Интернет — откуда угодно (мобильный интернет, другой город)</label>
+      <label class="settings-radio"><input type="radio" name="listen" value="local"> Только этот компьютер</label>
+      <label class="settings-radio" ${ips.length ? "" : "hidden"}><input type="radio" name="listen" value="ip"> Только адрес
+        <select id="settings-ip">${ips.map((ip) => `<option>${escapeHtml(ip)}</option>`).join("")}</select></label>
+      <div class="form-row">
+        <label class="settings-field">Порт <input id="settings-port" type="number" min="1" max="65535"></label>
+      </div>
+      <label class="settings-field settings-wide"><span id="settings-public-label">Адрес для телефона и ссылок «Поделиться»</span>
+        <input id="settings-public" type="text" placeholder="http://192.168.1.5:8787" autocomplete="off">
+      </label>
+      <div class="settings-suggest" id="settings-public-suggest"></div>
+      <div class="settings-internet" id="settings-internet" hidden>
+        <p>Сервер будет слушать все сети, но из интернета его откроет не он, а один из вариантов:</p>
+        <ul>
+          <li><b>Tailscale</b> (проще и безопаснее всего): поставь его на компьютер и телефон, войди в один аккаунт. Порт открывать не нужно, адрес — <code>http://&lt;Tailscale-IP компьютера&gt;:${saved.port}</code>.</li>
+          <li><b>Cloudflare Tunnel</b>: даёт домен с HTTPS даже без белого IP. Адрес — <code>https://твой-домен</code>.</li>
+          <li><b>Белый IP</b>: на роутере пробрось TCP-порт ${saved.port} на этот компьютер. Адрес — <code>http://&lt;внешний IP&gt;:${saved.port}</code>; лучше поставить перед сервером Caddy с HTTPS.</li>
+        </ul>
+        <p>${multiUser ? "Вход в аккаунт включён; для multi-user нужен HTTPS." : s.phone?.auth_enabled ? "Пароль включён — без него в интернет выходить нельзя." : "<b>Сейчас сервер без пароля — в интернет так выходить нельзя.</b> Задай MUSIK_PASSWORD в .env."}
+          Работаешь по HTTPS — добавь в .env <code>MUSIK_SECURE_COOKIE=1</code>.</p>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Папка с музыкой</h3>
+      <div class="form-row settings-folder-row">
+        <input id="settings-library" type="text" autocomplete="off">
+        <button type="button" class="btn" id="settings-browse">Выбрать…</button>
+      </div>
+      <div class="settings-browser" id="settings-browser" hidden></div>
+      <p class="sub">После смены папки нужно пересканирование: треки из старой папки пропадут из библиотеки, история прослушиваний останется.</p>
+    </div>
+
+    <div class="form-row">
+      <button type="button" class="btn primary" id="settings-save">Сохранить</button>
+      <span class="sub" id="settings-hint">${escapeHtml(s.env_path || "")}</span>
+    </div>
+
+    <div class="settings-section">
+      <h3>Подключение телефона</h3>
+      ${
+        (phone.urls || []).length
+          ? `<p class="sub">Адрес сервера для приложения или браузера на телефоне:</p>
+             <ul class="settings-list">${phone.urls
+               .map(
+                 (u) => `<li><code>${escapeHtml(u)}</code>
+                   <button type="button" class="tiny" data-copy="${escapeAttr(u)}">копировать</button></li>`
+               )
+               .join("")}</ul>`
+          : `<p class="sub">Сейчас сервер открыт только на этом компьютере — выбери «Вся домашняя сеть» выше и перезапусти.</p>`
+      }
+      ${
+        phone.auth_enabled && phone.token
+          ? `<p class="sub">API-токен (вход в приложении, заголовок <code>Authorization: Bearer …</code>):</p>
+             <div class="settings-token">
+               <code id="settings-token">••••••••••••••••</code>
+               <button type="button" class="tiny" id="settings-token-show">показать</button>
+               <button type="button" class="tiny" id="settings-token-copy">копировать</button>
+             </div>`
+          : multiUser
+            ? `<p class="sub">Создай персональный токен и QR в разделе «Устройства и токены» выше. Он привязан к выбранному профилю.</p>`
+            : phone.auth_enabled
+            ? `<p class="sub">API-токен не задан — в приложении входи по паролю.</p>`
+            : `<p class="sub">Сервер работает без пароля: токен не нужен.</p>`
+      }
+      <div class="settings-qr" ${multiUser ? "hidden" : ""}>
+        <h3>QR-код для приложения</h3>
+        <div class="form-row">
+          <select id="settings-qr-url"></select>
+          <button type="button" class="btn" id="settings-qr-show">Показать QR</button>
+        </div>
+        <p class="sub" id="settings-qr-note"></p>
+        <div class="settings-qr-box" id="settings-qr-box" hidden>
+          <img id="settings-qr-img" alt="QR-код для подключения" width="240" height="240">
+          <p class="sub">Открой приложение musik (iPhone) или Sirin Music (Android) → «Сканировать QR».
+            В коде есть токен доступа — не показывай его посторонним.</p>
+        </div>
+      </div>
+      <div class="settings-token settings-external">
+        <span class="sub">Внешний IP (так компьютер виден из интернета):</span>
+        <code id="settings-external-ip">…</code>
+        <button type="button" class="tiny" id="settings-external-copy" hidden>копировать</button>
+        <button type="button" class="tiny" id="settings-external-refresh">обновить</button>
+      </div>
+      <p class="sub" id="settings-external-hint"></p>
+      <p class="sub">Описание API: <a href="${escapeAttr(phone.openapi || "/api/openapi.json")}" target="_blank" rel="noopener">openapi.json</a>
+        · проверка: <code>curl ${escapeHtml((phone.urls || [])[0] || location.origin)}/api/health</code></p>
+    </div>`;
+
+  // 0.0.0.0 plus a public address outside the LAN is the "internet" setup.
+  if (saved.mode === "lan" && s.saved.public_base_url && !isLanUrl(s.saved.public_base_url)) saved.mode = "internet";
+  box.querySelectorAll('input[name="listen"]').forEach((r) => {
+    r.checked = r.value === saved.mode;
+    r.onchange = renderPublicSuggest;
+  });
+  if (saved.mode === "ip") $("settings-ip").value = saved.host;
+  $("settings-ip").onchange = () => {
+    box.querySelector('input[name="listen"][value="ip"]').checked = true;
+    renderPublicSuggest();
+  };
+  $("settings-port").value = saved.port;
+  $("settings-port").oninput = renderPublicSuggest;
+  $("settings-public").value = s.saved.public_base_url || "";
+  $("settings-library").value = s.saved.library || "";
+  renderPublicSuggest();
+
+  $("settings-browse").onclick = () => {
+    const el = $("settings-browser");
+    if (!el.hidden) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    browseSettingsDir($("settings-library").value.trim()).catch(() => browseSettingsDir(""));
+  };
+  $("settings-save").onclick = () => saveSettings().catch((e) => toast(e.message || String(e)));
+  $("settings-restart").onclick = () => restartServer().catch((e) => toast(e.message || String(e)));
+  box.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => copyText(b.dataset.copy)));
+  $("settings-external-refresh").onclick = () => loadExternalIp(true);
+  $("settings-qr-url").onchange = () => showQr(!$("settings-qr-box").hidden);
+  $("settings-qr-show").onclick = () => showQr($("settings-qr-box").hidden);
+  $("settings-public").addEventListener("input", renderQrOptions);
+  renderQrOptions();
+  $("settings-external-copy").onclick = () => copyText(settingsExternalIp);
+  loadExternalIp(false);
+  const show = $("settings-token-show");
+  if (show) {
+    show.onclick = () => {
+      const code = $("settings-token");
+      const open = code.dataset.open === "1";
+      code.textContent = open ? "••••••••••••••••" : phone.token;
+      code.dataset.open = open ? "0" : "1";
+      show.textContent = open ? "показать" : "скрыть";
+    };
+    $("settings-token-copy").onclick = () => copyText(phone.token);
+  }
+}
+
+// The external address from the settings field (a domain or an IP outside the
+// home network), or "" when none is set.
+function externalAddress() {
+  const pub = ($("settings-public")?.value || "").trim().replace(/\/+$/, "");
+  return pub && !isLanUrl(pub) ? pub : "";
+}
+
+// Addresses the QR can carry. A configured external address is the address:
+// the QR carries only it, in any mode. In the "internet" mode without one the
+// external IP is offered; a phone on mobile data cannot reach 192.168.x.x.
+function qrUrlOptions() {
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value;
+  const port = Number($("settings-port")?.value) || 8787;
+  const external = externalAddress();
+  if (external) return [external];
+  const out = [];
+  const add = (u) => {
+    if (u && !out.includes(u)) out.push(u);
+  };
+  if (mode === "internet") {
+    if (settingsExternalIp) add(`http://${settingsExternalIp.includes(":") ? `[${settingsExternalIp}]` : settingsExternalIp}:${port}`);
+    return out;
+  }
+  (settingsData.phone?.urls || []).forEach(add);
+  return out.filter((u) => !/^https?:\/\/(127\.|localhost|\[::1\])/.test(u));
+}
+
+function renderQrOptions() {
+  const sel = $("settings-qr-url");
+  if (!sel) return;
+  const prev = sel.value;
+  const opts = qrUrlOptions();
+  sel.innerHTML = opts.map((u) => `<option>${escapeHtml(u)}</option>`).join("");
+  if (opts.includes(prev)) sel.value = prev;
+  const internet = document.querySelector('#settings-box input[name="listen"]:checked')?.value === "internet";
+  const note = $("settings-qr-note");
+  sel.disabled = !opts.length;
+  $("settings-qr-show").disabled = !opts.length;
+  note.textContent = opts.length
+    ? externalAddress()
+      ? "В QR — внешний адрес из настроек: телефон подключится к нему откуда угодно."
+      : internet
+      ? "Режим «Интернет»: в QR только внешний адрес (домен или внешний IP)."
+      : "Телефон должен быть в той же сети Wi-Fi, что и компьютер."
+    : internet
+      ? "Укажи внешний адрес выше (домен или IP в интернете) — без него QR не сделать."
+      : "Нет адреса для телефона: выбери «Вся домашняя сеть» и перезапусти сервер.";
+  if (!opts.length) $("settings-qr-box").hidden = true;
+  else if (!$("settings-qr-box").hidden) showQr(true);
+}
+
+function showQr(visible) {
+  const box = $("settings-qr-box");
+  const url = $("settings-qr-url").value;
+  box.hidden = !visible || !url;
+  $("settings-qr-show").textContent = box.hidden ? "Показать QR" : "Скрыть QR";
+  if (!box.hidden) $("settings-qr-img").src = `/api/settings/qr?url=${encodeURIComponent(url)}`;
+}
+
+// The server asks api.ipify.org (cached on the server for 10 minutes).
+async function loadExternalIp(refresh) {
+  const code = $("settings-external-ip");
+  const hint = $("settings-external-hint");
+  if (!code) return;
+  code.textContent = "…";
+  try {
+    const data = await api(`/api/settings/external-ip${refresh ? "?refresh=1" : ""}`);
+    settingsExternalIp = data.ip || "";
+  } catch (e) {
+    settingsExternalIp = "";
+    code.textContent = "не удалось узнать";
+    hint.textContent = "Нет связи с интернетом или сервис недоступен — нажми «обновить» позже.";
+    $("settings-external-copy").hidden = true;
+    return;
+  }
+  code.textContent = settingsExternalIp;
+  $("settings-external-copy").hidden = !settingsExternalIp;
+  renderQrOptions();
+  const own = (settingsData.local_ips || []).includes(settingsExternalIp);
+  hint.textContent = own
+    ? "Этот IP назначен самому компьютеру — роутер не нужен, достаточно открыть порт в брандмауэре."
+    : "Это адрес роутера. Чтобы открыть сервер из интернета, пробрось на роутере порт на этот компьютер. " +
+      "Если провайдер даёт «серый» IP (общий на многих), проброс не поможет — используй Tailscale или Cloudflare Tunnel.";
+  renderPublicSuggest();
+}
+
+function settingsListenAddr() {
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value || "lan";
+  const port = Number($("settings-port").value) || 8787;
+  if (mode === "local") return `127.0.0.1:${port}`;
+  if (mode === "ip") return `${$("settings-ip").value}:${port}`;
+  return `0.0.0.0:${port}`;
+}
+
+function isLanUrl(raw) {
+  let host = "";
+  try {
+    host = new URL(raw).hostname;
+  } catch (_) {
+    return true;
+  }
+  if (host === "localhost" || host.endsWith(".local")) return true;
+  const m = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+}
+
+// One-click values for the phone address: http://<this computer's IP>:<port>.
+function renderPublicSuggest() {
+  const el = $("settings-public-suggest");
+  if (!el) return;
+  const port = Number($("settings-port").value) || 8787;
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value;
+  const internet = mode === "internet";
+  $("settings-internet").hidden = !internet;
+  renderQrOptions();
+  $("settings-public-label").textContent = internet
+    ? "Внешний адрес сервера (домен или IP в интернете)"
+    : "Адрес для телефона и ссылок «Поделиться»";
+  $("settings-public").placeholder = internet ? "https://music.example.com" : "http://192.168.1.5:8787";
+  const ips =
+    mode === "ip"
+      ? [$("settings-ip").value]
+      : mode === "local"
+        ? []
+        : internet
+          ? settingsExternalIp ? [settingsExternalIp] : []
+          : settingsData.local_ips || [];
+  el.innerHTML = ips
+    .map((ip) => {
+      const url = `http://${ip.includes(":") ? `[${ip}]` : ip}:${port}`; // IPv6 needs brackets
+      return `<button type="button" class="chip" data-url="${escapeAttr(url)}">${escapeHtml(url)}</button>`;
+    })
+    .join("");
+  el.querySelectorAll("[data-url]").forEach((b) => (b.onclick = () => ($("settings-public").value = b.dataset.url)));
+}
+
+async function browseSettingsDir(path) {
+  const el = $("settings-browser");
+  const data = await api(`/api/settings/dirs?path=${encodeURIComponent(path || "")}`);
+  settingsDirPath = data.path || "";
+  el.innerHTML = `
+    <div class="settings-browser-head">
+      <button type="button" class="tiny" data-dir="${escapeAttr(data.parent || "")}" ${data.path ? "" : "disabled"}>↑ выше</button>
+      <code>${escapeHtml(data.path || "Диски")}</code>
+      <button type="button" class="tiny primary-tiny" id="settings-pick" ${data.path ? "" : "disabled"}>Выбрать эту папку</button>
+    </div>
+    <div class="settings-roots">${(data.roots || [])
+      .map((r) => `<button type="button" class="chip" data-dir="${escapeAttr(r.path)}">${escapeHtml(r.name)}</button>`)
+      .join("")}</div>
+    <ul class="settings-dirs">${
+      (data.dirs || []).length
+        ? data.dirs
+            .map((d) => `<li><button type="button" class="linkish" data-dir="${escapeAttr(d.path)}">📁 ${escapeHtml(d.name)}</button></li>`)
+            .join("")
+        : '<li class="sub">Вложенных папок нет</li>'
+    }</ul>`;
+  el.querySelectorAll("[data-dir]").forEach((b) => {
+    b.onclick = () => browseSettingsDir(b.dataset.dir).catch((e) => toast(e.message || String(e)));
+  });
+  $("settings-pick").onclick = () => {
+    $("settings-library").value = settingsDirPath;
+    el.hidden = true;
+  };
+}
+
+async function saveSettings() {
+  const mode = document.querySelector('#settings-box input[name="listen"]:checked')?.value;
+  const publicUrl = $("settings-public").value.trim();
+  if (mode === "internet" && (!publicUrl || isLanUrl(publicUrl))) {
+    toast("Для доступа из интернета укажи внешний адрес: домен, Tailscale-IP или белый IP");
+    $("settings-public").focus();
+    return;
+  }
+  const body = {
+    addr: settingsListenAddr(),
+    public_base_url: $("settings-public").value.trim(),
+    library: $("settings-library").value.trim(),
+  };
+  const libraryChanged = body.library !== settingsData.saved.library;
+  settingsData = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
+  if (libraryChanged) settingsData.rescan_after_restart = true;
+  renderSettings();
+  toast(settingsData.restart_pending ? "Сохранено — нужен перезапуск" : "Сохранено");
+}
+
+// Where this page will live after the restart: the listen address or port may
+// have changed.
+function urlAfterRestart(s) {
+  const next = splitListenAddr(s.saved.addr);
+  const loopbackPage = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+  if (loopbackPage || next.mode === "local") return `http://127.0.0.1:${next.port}`;
+  if (next.mode === "ip") return `http://${next.host}:${next.port}`;
+  return `${location.protocol}//${location.hostname}:${next.port}`;
+}
+
+async function restartServer() {
+  const s = settingsData;
+  if (!s.restart_supported) {
+    toast("Перезапусти сервер вручную: scripts/start-musik.ps1 -Restart или scripts/musik.sh restart");
+    return;
+  }
+  const target = urlAfterRestart(s);
+  const sameOrigin = target === location.origin;
+  const rescan = !!s.rescan_after_restart;
+  const btn = $("settings-restart");
+  btn.disabled = true;
+  btn.textContent = "Перезапуск…";
+  pushPlaybackState({ playing: false, keepalive: true });
+  await api("/api/settings/restart", { method: "POST", body: "{}" });
+  if (!sameOrigin) {
+    // Another address or port: the new server is not reachable from here.
+    setTimeout(() => (location.href = target), 8000);
+    toast(`Сервер переезжает на ${target}`);
+    return;
+  }
+  await new Promise((r) => setTimeout(r, 3000));
+  for (let i = 0; i < 60; i++) {
+    try {
+      const res = await fetch("/api/health", { cache: "no-store" });
+      if (res.ok) {
+        if (rescan) await api("/api/library/rescan", { method: "POST", body: "{}" }).catch(() => {});
+        location.reload();
+        return;
+      }
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  btn.disabled = false;
+  btn.textContent = "Перезапустить сервер";
+  toast("Сервер не ответил за минуту — проверь логи в папке data");
 }
 
 async function loadProfile() {
@@ -1574,9 +2893,6 @@ function tasteStatus(value) {
   }[value] || { title: "Твой вкус", chip: "—", lead: "" };
 }
 
-function maturityLabel(value) {
-  return tasteStatus(value).title;
-}
 
 function renderMonitor(p, week, rec) {
   const outcomes = rec.outcomes || week || {};
@@ -1748,6 +3064,8 @@ async function loadShares() {
 function togglePlay() {
   const audio = $("audio");
   if (!audio.src) {
+    // A session restored after a reload shows its track but has no audio attached yet.
+    if (current?.id) return renderNow(current);
     toast("Сначала выбери микс или трек");
     return;
   }
@@ -1869,6 +3187,208 @@ function commitSeek() {
   if (Math.abs((audio.currentTime || 0) - t) < 0.05 && !audio.seeking) finishSeek();
 }
 
+// ---- Playback sync (reload resume + hand-off between devices) ----
+// The server keeps one "where am I listening" row. Only the tab that is
+// actually playing writes it (syncOwner); every other tab or device reads it,
+// pauses itself when someone else starts playing, and keeps its paused player
+// cued to the latest track and position, so pressing play continues there.
+const syncTabId = randomId(); // per page load: two tabs are two players
+const SYNC_WRITE_MS = 5000;
+const SYNC_POLL_MS = 5000;
+let syncOwner = false;
+let lastSyncWrite = 0;
+let lastSyncSeen = 0; // ms timestamp of the newest state already applied/written
+
+function syncStamp(st) {
+  const t = Date.parse(st?.updated_at || "");
+  return Number.isFinite(t) ? t : 0;
+}
+
+// claim=true when playback starts on this tab (takes the state over); other
+// writes are heartbeats the server accepts only while this tab still owns it.
+function pushPlaybackState({ playing, keepalive = false, claim = false } = {}) {
+  const audio = $("audio");
+  if (!syncOwner || !current?.id) return;
+  lastSyncWrite = Date.now();
+  const body = JSON.stringify({
+    session_id: sessionId || "",
+    track_id: current.id,
+    position_sec: audio.currentTime || 0,
+    listened_sec: listenedAccum,
+    playing: typeof playing === "boolean" ? playing : !audio.paused,
+    client_id: syncTabId,
+    claim,
+  });
+  fetch("/api/playback/state", {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive,
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d?.state) return;
+      if (d.ok) {
+        const at = syncStamp(d.state);
+        if (at > lastSyncSeen) lastSyncSeen = at;
+      } else {
+        // Another device claimed playback in the meantime.
+        lastSyncSeen = syncStamp(d.state);
+        yieldPlayback(d.state).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
+// Another device owns playback now: stop here (ownership first, so the pause
+// handler does not write back) and cue its track and position.
+async function yieldPlayback(st, track) {
+  const audio = $("audio");
+  syncOwner = false;
+  if (st.playing && !audio.paused) {
+    audio.pause();
+    setPlayIcon(false);
+    toast("Играет на другом устройстве");
+  }
+  if (audio.paused) await cuePlaybackState(st, track);
+}
+
+// Cue the given state into this (paused) player: same session, same track,
+// same position and listened time. Refreshes the queue/playlist when the
+// track changed, so next/prev continue the same list.
+async function cuePlaybackState(st, track) {
+  const audio = $("audio");
+  if (st.session_id && st.session_id !== sessionId) setSession(st.session_id);
+  if (current?.id === st.track_id && audio.src) {
+    if (Math.abs((audio.currentTime || 0) - st.position_sec) > 2) {
+      lastPos = st.position_sec;
+      audio.currentTime = st.position_sec;
+    }
+    listenedAccum = st.listened_sec || 0;
+    return;
+  }
+  let cueTrack = track;
+  if (sessionId) {
+    try {
+      const now = await api(`/api/now?session_id=${encodeURIComponent(sessionId)}`);
+      applyPlayPayload({ ...now, current: null }, { autoplay: false });
+      // /api/now carries impression_id for the session's current track, which
+      // ties the resumed listen to the original recommendation.
+      if (now?.current?.id === st.track_id) cueTrack = now.current;
+    } catch (_) {
+      setSession(null);
+    }
+  }
+  if (!cueTrack) return;
+  audio.dataset.trackId = "";
+  renderNow(cueTrack, {
+    autoplay: false,
+    announce: false,
+    startAt: st.position_sec,
+    listened: st.listened_sec,
+  });
+}
+
+// Boot: resume where the owner last listened (this or another device).
+async function restorePlayback() {
+  let data = null;
+  try {
+    data = await api("/api/playback/state");
+  } catch (_) {}
+  const st = data?.state;
+  if (st?.track_id) {
+    lastSyncSeen = syncStamp(st);
+    await cuePlaybackState(st, data.track);
+    return;
+  }
+  // No saved position yet: fall back to the session this browser remembers.
+  if (!sessionId) return;
+  try {
+    const now = await api(`/api/now?session_id=${encodeURIComponent(sessionId)}`);
+    if (now?.current) applyPlayPayload(now, { autoplay: false });
+  } catch (_) {
+    setSession(null);
+  }
+}
+
+async function pollPlaybackState() {
+  const audio = $("audio");
+  if (!authReady) return;
+  if (document.hidden && audio.paused) return;
+  let data;
+  try {
+    data = await api("/api/playback/state");
+  } catch (_) {
+    return;
+  }
+  const st = data?.state;
+  if (!st?.track_id || st.client_id === syncTabId) return;
+  const at = syncStamp(st);
+  if (at <= lastSyncSeen) return;
+  lastSyncSeen = at;
+  await yieldPlayback(st, data.track);
+}
+
+// After a deploy an open tab (a phone keeps them for days) would go on running
+// the old app.js, which knows nothing about new features such as the sync
+// above. /api/health reports a hash of the UI files; when it changes the page
+// reloads itself as soon as nothing is playing, and resumes where it was.
+const VERSION_CHECK_MS = 60000;
+let loadedStaticVersion = "";
+let reloadPending = false;
+
+async function checkStaticVersion() {
+  let health;
+  try {
+    const res = await fetch("/api/health", { cache: "no-store", credentials: "same-origin" });
+    health = await res.json();
+  } catch (_) {
+    return;
+  }
+  const v = health?.static || "";
+  if (!v) return;
+  if (!loadedStaticVersion) {
+    loadedStaticVersion = v;
+    return;
+  }
+  if (v !== loadedStaticVersion) {
+    reloadPending = true;
+    reloadIfIdle();
+  }
+}
+
+function reloadIfIdle() {
+  const audio = $("audio");
+  // "ended" and a skip also pause for a moment before the next track starts.
+  if (!reloadPending || (audio && (!audio.paused || audio.ended))) return;
+  pushPlaybackState({ playing: false, keepalive: true });
+  location.reload();
+}
+
+function wireSync() {
+  setInterval(() => pollPlaybackState().catch(() => {}), SYNC_POLL_MS);
+  checkStaticVersion();
+  setInterval(() => checkStaticVersion(), VERSION_CHECK_MS);
+  // iOS restores pages from the back/forward cache without a reload.
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+      checkStaticVersion();
+      pollPlaybackState().catch(() => {});
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) pushPlaybackState({ keepalive: true });
+    else {
+      checkStaticVersion();
+      pollPlaybackState().catch(() => {});
+    }
+  });
+  window.addEventListener("focus", () => pollPlaybackState().catch(() => {}));
+  // Closing the tab stops the music: save the position as paused.
+  window.addEventListener("pagehide", () => pushPlaybackState({ playing: false, keepalive: true }));
+}
+
 function wireAudio() {
   const audio = $("audio");
   const seek = $("seek");
@@ -1885,7 +3405,8 @@ function wireAudio() {
       $("time-dur").textContent = fmtTime(audio.duration);
     }
     const now = Date.now();
-    if (now - lastProgressAt > 4000 && current) {
+    if (!audio.paused && now - lastSyncWrite > SYNC_WRITE_MS) pushPlaybackState();
+    if (!audio.paused && now - lastProgressAt > 4000 && current) {
       lastProgressAt = now;
       postEvent("progress", {
         position_sec: pos,
@@ -1896,13 +3417,53 @@ function wireAudio() {
   });
   audio.addEventListener("loadedmetadata", () => {
     $("time-dur").textContent = fmtTime(audio.duration || 0);
+    updatePositionState();
   });
-  audio.addEventListener("play", () => setPlayIcon(true));
+  audio.addEventListener("play", () => {
+    setPlayIcon(true);
+    updatePositionState();
+    // Playing here takes the shared state over from any other device.
+    syncOwner = true;
+    pushPlaybackState({ playing: true, claim: true });
+  });
   audio.addEventListener("pause", () => {
     if (seeking || audio.seeking) return;
     setPlayIcon(false);
+    updatePositionState();
+    pushPlaybackState({ playing: false });
+    if (reloadPending) setTimeout(reloadIfIdle, 3000);
   });
-  audio.addEventListener("seeked", finishSeek);
+  audio.addEventListener("seeked", () => {
+    finishSeek();
+    updatePositionState();
+    pushPlaybackState();
+  });
+  // A file the browser cannot play (a broken or unusual rip) fires "error" and
+  // would leave the radio standing on it, silently in a background tab. Close
+  // it as an ended track with no verdict, so taste is untouched, and move on.
+  // Several failures in a row stop, so a dead server does not loop.
+  audio.addEventListener("error", () => {
+    const id = Number(audio.dataset.trackId || 0);
+    const gen = Number(audio.dataset.gen || 0);
+    if (!id || gen !== playbackGen || id !== current?.id || !sessionId) return;
+    if (audio.error?.code === MediaError.MEDIA_ERR_ABORTED) return;
+    unplayableRun += 1;
+    if (unplayableRun > 3) {
+      toast("Не получается воспроизвести треки подряд");
+      return;
+    }
+    toast(`Не удалось воспроизвести «${current.title || "трек"}», дальше`);
+    postEvent("track_end", {
+      reason: "unplayable",
+      track_id: id,
+      impression_id: current?.impression_id,
+      listened_sec: listenedAccum,
+      duration_sec: current?.duration || 0,
+    }).catch(console.error);
+  });
+  audio.addEventListener("playing", () => {
+    unplayableRun = 0;
+  });
   audio.addEventListener("ended", () => {
     const id = Number(audio.dataset.trackId || 0);
     const gen = Number(audio.dataset.gen || 0);
@@ -1943,7 +3504,13 @@ function wireAudio() {
 }
 
 const AUDIO_EXTS = new Set([".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus"]);
+const ARCHIVE_EXTS = [".zip", ".tar", ".tar.gz", ".tgz"];
 const UPLOAD_BATCH = 8;
+
+function uploadSupported(name) {
+  const lower = String(name || "").toLowerCase();
+  return AUDIO_EXTS.has(audioExt(lower)) || ARCHIVE_EXTS.some((ext) => lower.endsWith(ext));
+}
 
 function audioExt(name) {
   const i = String(name || "").lastIndexOf(".");
@@ -2164,14 +3731,14 @@ function queueMusicUpload(fileList) {
 
 async function uploadMusicFiles(fileList) {
   const all = [...fileList];
-  const files = all.filter((f) => AUDIO_EXTS.has(audioExt(f.name)));
+  const files = all.filter((f) => uploadSupported(f.name));
   const skippedExt = all.length - files.length;
   if (!files.length) {
     setOpBar({
       state: "error",
-      title: "Нет аудиофайлов",
+      title: "Нет музыки или поддерживаемых архивов",
       detail: skippedExt
-        ? `Пропущено ${skippedExt}: нужны MP3, FLAC, M4A, WAV, OGG или Opus.`
+        ? `Пропущено ${skippedExt}: нужны аудиофайлы, ZIP, TAR или TAR.GZ.`
         : "Файлы не выбраны.",
       pct: 0,
     });
@@ -2197,6 +3764,7 @@ async function uploadMusicFiles(fileList) {
       const res = await fetch("/api/library/upload", {
         method: "POST",
         credentials: "same-origin",
+        headers: csrfHeaders(),
         body: fd,
       });
       if (res.status === 401) {
@@ -2218,7 +3786,7 @@ async function uploadMusicFiles(fileList) {
       setOpBar({
         state: "run",
         title: "Загрузка на диск",
-        detail: `${done} из ${files.length} · сохранено ${saved}${skipped ? ` · пропущено ${skipped}` : ""}`,
+        detail: `${done} из ${files.length} · треков сохранено ${saved}${skipped ? ` · пропущено ${skipped}` : ""}`,
         pct: (done / files.length) * 55,
       });
     }
@@ -3092,7 +4660,7 @@ function tokensFromForm() {
 
 function ensureThemeStylesheet(id) {
   if (!THEME_ID_RE.test(id) || id === "ember") return;
-  const href = `/themes/${id}.css?v=retro3`;
+  const href = `/themes/${id}.css?v=retro5`;
   if ([...document.querySelectorAll('link[rel="stylesheet"]')].some((link) => link.getAttribute("href") === href)) return;
   const link = document.createElement("link");
   link.rel = "stylesheet";
@@ -3325,6 +4893,18 @@ function saveCustomTheme(event) {
   toast("Theme saved");
 }
 
+// The server picks the page by the musik_ui cookie (MUSIK_UI sets the
+// default); both pages share this script.
+function wireUiChoice() {
+  const select = $("ui-choice");
+  if (!select) return;
+  select.value = document.querySelector('link[href^="/redesign.css"]') ? "mozgolika" : "original";
+  select.onchange = () => {
+    document.cookie = `musik_ui=${select.value}; path=/; max-age=31536000; SameSite=Lax`;
+    location.reload();
+  };
+}
+
 function wireTheme() {
   renderThemeList();
   loadInstalledThemes();
@@ -3343,18 +4923,44 @@ function wireTheme() {
 
 function wire() {
   wireTheme();
-  document.querySelectorAll(".tab").forEach((b) => {
-    b.onclick = () => setView(b.dataset.view);
+  wireUiChoice();
+  wireMediaSession();
+  document.querySelectorAll(".tab[data-view]").forEach((b) => {
+    b.onclick = () => {
+      if (b.dataset.libDefault) libTab = b.dataset.libDefault;
+      setView(b.dataset.view, b.dataset.nav);
+      if (b.dataset.nav === "search") setTimeout(() => $("lib-filter")?.focus(), 60);
+    };
   });
   document.querySelectorAll("[data-lib-tab]").forEach((b) => {
     b.onclick = () => {
       libTab = b.dataset.libTab;
-      setView("library");
+      libArtist = null;
+      setView("library", "collection");
     };
   });
-  document.querySelectorAll("#view-library .seg-btn").forEach((b) => {
-    b.onclick = () => setLibTab(b.dataset.lib);
+  document.querySelectorAll("#view-library .seg-btn[data-lib]").forEach((b) => {
+    b.onclick = () => {
+      libArtist = null;
+      setLibTab(b.dataset.lib);
+    };
   });
+  if ($("seg-playlists")) $("seg-playlists").onclick = () => setView("collections", "collection");
+  $("lib-artist-back").onclick = () => {
+    libArtist = null;
+    setLibTab("artists");
+  };
+  $("lib-artist-play").onclick = () => {
+    if (libArtist) playFixed({ artist: libArtist }).catch((e) => toast(e.message || String(e)));
+  };
+  $("lib-artist-radio").onclick = () => {
+    const seed = tracksOfArtist(libArtist)[0];
+    if (seed) startRadio(seed.id).catch((e) => toast(e.message || String(e)));
+  };
+  $("lib-artist-playlist").onclick = () => {
+    const ids = tracksOfArtist(libArtist).map((t) => t.id);
+    if (ids.length) pickPlaylistForTracks(ids).catch((e) => toast(e.message || String(e)));
+  };
   $("lib-sort").onchange = () => {
     libSort = $("lib-sort").value;
     renderLib($("lib-filter").value || "");
@@ -3385,7 +4991,7 @@ function wire() {
   $("btn-fav-album").onclick = () => {
     if (!current?.album) return toast("Нет альбома");
     toggleFavorite(
-      { type: "album", artist: current.artist, album: current.album },
+      { type: "album", artist: albumOwner(current), album: current.album },
       { withLike: false }
     ).catch((e) => toast(e.message || String(e)));
   };
@@ -3472,7 +5078,7 @@ function wire() {
       const res = await fetch("/api/playlists/import?name=" + encodeURIComponent(file.name), {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": ct },
+        headers: { "Content-Type": ct, ...csrfHeaders() },
         body: text,
       });
       if (!res.ok) throw new Error((await res.json()).error || res.statusText);
@@ -3484,6 +5090,29 @@ function wire() {
     e.target.value = "";
   };
   $("btn-dislike").onclick = () => postEvent("dislike").catch((e) => toast(e.message || String(e)));
+  if ($("btn-more")) $("btn-more").onclick = () => {
+    if (!current?.id) return toast("Сейчас ничего не играет");
+    postEvent("like")
+      .then(() => toast("Понял — больше такого"))
+      .catch((e) => toast(e.message || String(e)));
+  };
+  if ($("btn-notthis")) $("btn-notthis").onclick = async () => {
+    if (!current?.id) return toast("Сейчас ничего не играет");
+    try {
+      await postEvent("dislike");
+      await skipTrack();
+    } catch (e) {
+      toast(e.message || String(e));
+    }
+  };
+  document.querySelectorAll(".np-tab").forEach((b) => (b.onclick = () => setNowTab(b.dataset.npTab)));
+  if ($("btn-np-share")) $("btn-np-share").onclick = () => createShareLink().catch((e) => toast(e.message || String(e)));
+  if ($("btn-np-more")) $("btn-np-more").onclick = () => {
+    const extra = document.querySelector("#view-player .fav-extra");
+    const open = !extra.classList.contains("open");
+    extra.classList.toggle("open", open);
+    $("btn-np-more").setAttribute("aria-expanded", String(open));
+  };
   $("btn-skip").onclick = () => skipTrack().catch((e) => toast(e.message || String(e)));
   $("mini-skip").onclick = (e) => {
     e.stopPropagation();
@@ -3500,11 +5129,14 @@ function wire() {
   $("mini-volume").oninput = () => setVolume($("mini-volume").value);
   $("btn-mute").onclick = toggleMute;
   $("mini-open").onclick = () => setView("player");
-  $("btn-later").onclick = async () => {
-    if (!current?.id) return toast("Сейчас ничего не играет");
-    await api("/api/later", { method: "POST", body: JSON.stringify({ track_id: current.id }) });
-    toast("Добавлено в «Потом»");
-  };
+  $("btn-queue-open").onclick = openQueueModal;
+  $("btn-queue-close").onclick = closeQueueModal;
+  $("queue-modal").addEventListener("click", (e) => {
+    if (e.target === $("queue-modal")) closeQueueModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeQueueModal();
+  });
   $("btn-discover-new").onclick = () => showTips("new").catch((e) => toast(e.message || String(e)));
   $("btn-discover-old").onclick = () => showTips("old").catch((e) => toast(e.message || String(e)));
   $("lib-filter").oninput = (e) => {
@@ -3529,26 +5161,17 @@ function wire() {
 }
 
 async function bootApp() {
-  startBackgroundJobsMonitor();
+  if (!multiUser || account?.user?.roles?.includes("admin")) startBackgroundJobsMonitor();
   api("/api/profile")
     .then((p) => renderMaturity(p.maturity))
     .catch(console.error);
   loadMixes().catch(console.error);
-  loadHomeCatalog().catch(console.error);
-  if (sessionId) {
-    api(`/api/now?session_id=${encodeURIComponent(sessionId)}`)
-      .then((now) => {
-        if (!now?.current) return;
-        applyPlayPayload(now, { autoplay: false });
-      })
-      .catch(() => {
-        sessionStorage.removeItem("musik_session");
-        sessionId = null;
-      });
-  }
+  loadArtistPhotos().finally(() => loadHomeCatalog().catch(console.error));
+  restorePlayback().catch(console.error);
 }
 
 wireAudio();
+wireSync();
 wire();
 
 $("login-form").onsubmit = (e) => {
@@ -3558,6 +5181,85 @@ $("login-form").onsubmit = (e) => {
 };
 $("btn-logout").onclick = () => doLogout().catch((e) => toast(e.message || String(e)));
 $("btn-logout-profile").onclick = () => doLogout().catch((e) => toast(e.message || String(e)));
+$("password-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/account/password", { method: "POST", body: JSON.stringify({ current: $("password-current").value, new: $("password-new").value }) });
+    event.target.reset();
+    toast("Пароль изменён");
+  } catch (error) { toast(error.message); }
+};
+$("oidc-link").onclick = async () => {
+  try {
+    const result = await api("/api/auth/oidc/default/link", { method: "POST", body: "{}" });
+    location.assign(result.authorization_url);
+  } catch (error) { toast(error.message); }
+};
+
+function reloadProfile() {
+  $("audio")?.pause();
+  sessionStorage.removeItem("musik_session");
+  location.reload();
+}
+document.querySelectorAll("[data-profile-switch]").forEach((select) => select.onchange = async (event) => {
+  try { await api(`/api/profiles/${encodeURIComponent(event.target.value)}/activate`, { method: "POST", body: "{}" }); reloadProfile(); }
+  catch (error) { toast(error.message); await ensureAuth(); }
+});
+$("profile-create-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { await api("/api/profiles", { method: "POST", body: JSON.stringify({ name: $("profile-new-name").value }) }); $("profile-new-name").value = ""; await ensureAuth(); toast("Профиль создан"); }
+  catch (error) { toast(error.message); }
+};
+$("profile-rename-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { await api(`/api/profiles/${account.active_profile.id}`, { method: "PATCH", body: JSON.stringify({ name: $("profile-active-name").value }) }); await ensureAuth(); toast("Название сохранено"); }
+  catch (error) { toast(error.message); }
+};
+$("profile-delete").onclick = async () => {
+  if (!confirm(`Удалить профиль «${account.active_profile.name}»? Его данные будут сохранены в архиве.`)) return;
+  try { await api(`/api/profiles/${account.active_profile.id}`, { method: "DELETE" }); reloadProfile(); }
+  catch (error) { toast(error.message); }
+};
+$("device-token-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    const result = await api("/api/account/device-tokens", {
+      method: "POST",
+      body: JSON.stringify({ name: $("device-token-name").value, profile_id: $("device-token-profile").value }),
+    });
+    $("device-token-name").value = "";
+    showDeviceTokenSecret(result.token, result.qr);
+    await refreshDeviceTokens();
+  } catch (error) { toast(error.message); }
+};
+$("device-token-copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($("device-token-secret").value);
+    toast("Токен скопирован");
+  } catch (_) {
+    $("device-token-secret").select();
+    toast("Выдели токен и скопируй его вручную");
+  }
+};
+$("device-token-dismiss").onclick = () => {
+  $("device-token-secret").value = "";
+  $("device-token-qr").replaceChildren();
+  $("device-token-created").hidden = true;
+};
+$("invitation-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { const invite = await api("/api/admin/invitations", { method: "POST", body: JSON.stringify({ email: $("invitation-email").value, ttl_hours: Number($("invitation-hours").value) }) }); $("invitation-url").value = invite.url; $("invitation-result").hidden = false; }
+  catch (error) { toast(error.message); }
+};
+window.addEventListener("focus", async () => {
+  if (!multiUser || !account) return;
+  try {
+    const me = await api("/api/auth/me");
+    if (!me.authenticated || me.user.id !== account.user.id || me.active_profile.id !== account.active_profile.id) reloadProfile();
+    await refreshDeviceTokens();
+  }
+  catch (_) {}
+});
 
 ensureAuth()
   .then((ok) => {

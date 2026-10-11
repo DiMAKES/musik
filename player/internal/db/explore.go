@@ -24,7 +24,7 @@ func (s *Store) LoadRadioPrefs() (RadioPrefs, error) {
 	prefs := RadioPrefs{ExploreLo: 0.10, ExploreHi: 0.40}
 	var lo, hi float64
 	err := s.DB.QueryRow(`
-SELECT explore_lo, explore_hi FROM radio_prefs WHERE owner_scope='local'`).Scan(&lo, &hi)
+SELECT explore_lo, explore_hi FROM radio_prefs WHERE profile_id = ? AND owner_scope='local'`, s.ProfileID).Scan(&lo, &hi)
 	if err == sql.ErrNoRows {
 		return prefs, nil
 	}
@@ -38,28 +38,19 @@ SELECT explore_lo, explore_hi FROM radio_prefs WHERE owner_scope='local'`).Scan(
 func (s *Store) SaveRadioPrefs(lo, hi float64) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.DB.Exec(`
-INSERT INTO radio_prefs(owner_scope, explore_lo, explore_hi, updated_at)
-VALUES ('local', ?, ?, ?)
-ON CONFLICT(owner_scope) DO UPDATE SET
+INSERT INTO radio_prefs(owner_scope, explore_lo, explore_hi, updated_at, profile_id)
+VALUES ('local', ?, ?, ?, ?)
+ON CONFLICT(profile_id,owner_scope) DO UPDATE SET
   explore_lo=excluded.explore_lo, explore_hi=excluded.explore_hi, updated_at=excluded.updated_at`,
-		lo, hi, now)
+		lo, hi, now, s.ProfileID)
 	return err
 }
 
 func (s *Store) LoadExploreArms() ([]ExploreArmRow, error) {
-	rows, err := s.DB.Query(`
-SELECT arm_key, arm_kind, alpha, beta, successes, failures, COALESCE(last_decay_at, '')
-FROM explore_arms`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []ExploreArmRow
-	for rows.Next() {
-		var row ExploreArmRow
+	return QueryAll(s.DB, func(rows *sql.Rows, row *ExploreArmRow) error {
 		var decay string
 		if err := rows.Scan(&row.ArmKey, &row.ArmKind, &row.Alpha, &row.Beta, &row.Successes, &row.Failures, &decay); err != nil {
-			return nil, err
+			return err
 		}
 		if decay != "" {
 			if ts, err := time.Parse(time.RFC3339Nano, decay); err == nil {
@@ -68,9 +59,10 @@ FROM explore_arms`)
 				row.LastDecayAt = ts
 			}
 		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+		return nil
+	}, `
+SELECT arm_key, arm_kind, alpha, beta, successes, failures, COALESCE(last_decay_at, '')
+FROM explore_arms WHERE profile_id = ?`, s.ProfileID)
 }
 
 func (s *Store) UpdateExploreArm(key, kind string, success bool) error {
@@ -88,15 +80,15 @@ func (s *Store) UpdateExploreArm(key, kind string, success bool) error {
 	}
 	_, err := s.DB.Exec(`
 INSERT INTO explore_arms(
-  arm_key, arm_kind, alpha, beta, successes, failures, last_decay_at, updated_at, owner_scope
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local')
-ON CONFLICT(arm_key) DO UPDATE SET
+  arm_key, arm_kind, alpha, beta, successes, failures, last_decay_at, updated_at, owner_scope, profile_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'local', ?)
+ON CONFLICT(profile_id,arm_key) DO UPDATE SET
   alpha=explore_arms.alpha + ?,
   beta=explore_arms.beta + ?,
   successes=explore_arms.successes + ?,
   failures=explore_arms.failures + ?,
   updated_at=excluded.updated_at`,
-		key, kind, priorA+alphaInc, priorB+betaInc, succInc, failInc, now, now,
+		key, kind, priorA+alphaInc, priorB+betaInc, succInc, failInc, now, now, s.ProfileID,
 		alphaInc, betaInc, succInc, failInc)
 	return err
 }
@@ -105,11 +97,11 @@ func (s *Store) ExploreSourceOutcomeCounts() (map[string]int, error) {
 	rows, err := s.DB.Query(`
 SELECT source, COUNT(*)
 FROM recommendation_impressions
-WHERE legacy=0
+WHERE profile_id = ? AND legacy=0
   AND played_at IS NOT NULL
   AND outcome IN ('finished', 'early_skip')
   AND source IN ('explore_adjacent', 'resurface', 'new_in_library', 'wildcard')
-GROUP BY source`)
+GROUP BY source`, s.ProfileID)
 	if err != nil {
 		return nil, err
 	}

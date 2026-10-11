@@ -1,9 +1,11 @@
 package playlist
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/torwin-job/musik/player/internal/db"
 )
@@ -11,9 +13,9 @@ import (
 const RuleSchemaVersion = 1
 
 type Rule struct {
-	SchemaVersion int     `json:"schema_version"`
-	Limit         int     `json:"limit,omitempty"`
-	Sort          string  `json:"sort,omitempty"`
+	SchemaVersion int      `json:"schema_version"`
+	Limit         int      `json:"limit,omitempty"`
+	Sort          string   `json:"sort,omitempty"`
 	All           []Clause `json:"all,omitempty"`
 	Any           []Clause `json:"any,omitempty"`
 }
@@ -72,16 +74,17 @@ func Evaluate(store *db.Store, rule Rule) ([]int64, error) {
 SELECT t.id
 FROM tracks t
 LEFT JOIN features f ON f.track_id = t.id
-LEFT JOIN track_stats ts ON ts.track_id = t.id
-LEFT JOIN track_preferences pref ON pref.track_id = t.id
-LEFT JOIN favorites fav ON fav.track_id = t.id
+LEFT JOIN track_stats ts ON ts.track_id = t.id AND ts.profile_id = ?
+LEFT JOIN track_preferences pref ON pref.track_id = t.id AND pref.profile_id = ?
+LEFT JOIN favorites fav ON fav.track_id = t.id AND fav.profile_id = ?
 WHERE t.is_active = 1 AND t.is_duplicate_of IS NULL`
-	args := []any{}
-	allSQL, allArgs, err := compileGroup(rule.All, "AND")
+	profile := store.ProfileID
+	args := []any{profile, profile, profile}
+	allSQL, allArgs, err := compileGroup(rule.All, "AND", profile)
 	if err != nil {
 		return nil, err
 	}
-	anySQL, anyArgs, err := compileGroup(rule.Any, "OR")
+	anySQL, anyArgs, err := compileGroup(rule.Any, "OR", profile)
 	if err != nil {
 		return nil, err
 	}
@@ -114,30 +117,19 @@ WHERE t.is_active = 1 AND t.is_duplicate_of IS NULL`
 	}
 	q += " LIMIT ?"
 	args = append(args, limit)
-	rows, err := store.DB.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return db.QueryAll(store.DB, func(rows *sql.Rows, id *int64) error {
+		return rows.Scan(id)
+	}, q, args...)
 }
 
-func compileGroup(clauses []Clause, join string) (string, []any, error) {
+func compileGroup(clauses []Clause, join, profileID string) (string, []any, error) {
 	if len(clauses) == 0 {
 		return "", nil, nil
 	}
 	parts := make([]string, 0, len(clauses))
 	var args []any
 	for _, clause := range clauses {
-		sql, extra, err := compileClause(clause)
+		sql, extra, err := compileClause(clause, profileID)
 		if err != nil {
 			return "", nil, err
 		}
@@ -147,7 +139,7 @@ func compileGroup(clauses []Clause, join string) (string, []any, error) {
 	return strings.Join(parts, " "+join+" "), args, nil
 }
 
-func compileClause(c Clause) (string, []any, error) {
+func compileClause(c Clause, profileID string) (string, []any, error) {
 	switch c.Field {
 	case "artist":
 		return compareText("lower(trim(t.artist))", c)
@@ -173,7 +165,7 @@ func compileClause(c Clause) (string, []any, error) {
 	case "last_played":
 		return compareLastPlayed(c)
 	case "tag":
-		return compareTag(c)
+		return compareTag(c, profileID)
 	default:
 		return "", nil, fmt.Errorf("unsupported field")
 	}
@@ -188,7 +180,7 @@ func compareText(expr string, c Clause) (string, []any, error) {
 	case "in", "not_in":
 		values := asStringSlice(c.Value)
 		if len(values) == 0 {
-			return "0", nil, nil
+			return "1=0", nil, nil
 		}
 		ph := make([]string, len(values))
 		args := make([]any, len(values))
@@ -207,35 +199,44 @@ func compareText(expr string, c Clause) (string, []any, error) {
 }
 
 func compareNumber(expr string, c Clause) (string, []any, error) {
+	// Rule values are JSON numbers; bind them as doubles so integer columns
+	// compare the same way on SQLite and PostgreSQL.
+	const value = "CAST(? AS DOUBLE PRECISION)"
 	switch c.Op {
 	case "eq":
-		return expr + " = ?", []any{asFloat(c.Value)}, nil
+		return expr + " = " + value, []any{asFloat(c.Value)}, nil
 	case "neq":
-		return expr + " <> ?", []any{asFloat(c.Value)}, nil
+		return expr + " <> " + value, []any{asFloat(c.Value)}, nil
 	case "gt":
-		return expr + " > ?", []any{asFloat(c.Value)}, nil
+		return expr + " > " + value, []any{asFloat(c.Value)}, nil
 	case "gte":
-		return expr + " >= ?", []any{asFloat(c.Value)}, nil
+		return expr + " >= " + value, []any{asFloat(c.Value)}, nil
 	case "lt":
-		return expr + " < ?", []any{asFloat(c.Value)}, nil
+		return expr + " < " + value, []any{asFloat(c.Value)}, nil
 	case "lte":
-		return expr + " <= ?", []any{asFloat(c.Value)}, nil
+		return expr + " <= " + value, []any{asFloat(c.Value)}, nil
 	case "between":
 		a, b := asPair(c.Value)
-		return expr + " BETWEEN ? AND ?", []any{a, b}, nil
+		return expr + " BETWEEN " + value + " AND " + value, []any{a, b}, nil
 	default:
 		return "", nil, fmt.Errorf("op %s not valid for number", c.Op)
 	}
 }
 
 func compareLastPlayed(c Clause) (string, []any, error) {
+	days := int(asFloat(c.Value))
+	if days < 0 {
+		days = 0
+	}
+	if days > 36500 {
+		days = 36500
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)
 	switch c.Op {
 	case "older_than_days":
-		return "ts.last_played_at IS NOT NULL AND ts.last_played_at <= datetime('now', ?)",
-			[]any{fmt.Sprintf("-%d days", int(asFloat(c.Value)))}, nil
+		return "ts.last_played_at IS NOT NULL AND ts.last_played_at <= ?", []any{cutoff}, nil
 	case "newer_than_days":
-		return "ts.last_played_at IS NOT NULL AND ts.last_played_at >= datetime('now', ?)",
-			[]any{fmt.Sprintf("-%d days", int(asFloat(c.Value)))}, nil
+		return "ts.last_played_at IS NOT NULL AND ts.last_played_at >= ?", []any{cutoff}, nil
 	case "eq":
 		if !asBool(c.Value) {
 			return "ts.last_played_at IS NULL", nil, nil
@@ -246,24 +247,24 @@ func compareLastPlayed(c Clause) (string, []any, error) {
 	}
 }
 
-func compareTag(c Clause) (string, []any, error) {
+func compareTag(c Clause, profileID string) (string, []any, error) {
 	names := asStringSlice(c.Value)
 	if c.Op == "eq" {
 		names = []string{fmt.Sprint(c.Value)}
 	}
 	if len(names) == 0 {
-		return "0", nil, nil
+		return "1=0", nil, nil
 	}
 	ph := make([]string, len(names))
-	args := make([]any, len(names))
+	args := []any{profileID}
 	for i, name := range names {
 		ph[i] = "lower(?)"
-		args[i] = name
+		args = append(args, name)
 	}
 	sql := `t.id IN (
 SELECT tt.track_id FROM track_tags tt
-JOIN custom_tags ct ON ct.tag_id = tt.tag_id
-WHERE ct.archived_at IS NULL AND lower(ct.name) IN (` + strings.Join(ph, ",") + `))`
+JOIN custom_tags ct ON ct.profile_id = tt.profile_id AND ct.tag_id = tt.tag_id
+WHERE tt.profile_id = ? AND ct.archived_at IS NULL AND lower(ct.name) IN (` + strings.Join(ph, ",") + `))`
 	if c.Op == "not_in" || c.Op == "neq" {
 		sql = "NOT " + sql
 	}

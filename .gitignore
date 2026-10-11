@@ -29,6 +29,7 @@ docs/paper-*
 *.npz
 
 # Python / ML environments
+.venv
 .venv/
 .venv-rocm/
 .rocm-extra/

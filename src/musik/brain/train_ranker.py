@@ -20,6 +20,7 @@ from musik.brain.ranker import (
 )
 from musik.config import get_settings
 from musik.db.schema import connect, utcnow
+from musik.db.scoped_connection import active_profile
 
 MIN_LABELS = 1500
 MIN_PER_CLASS = 200
@@ -91,15 +92,18 @@ def load_labeled_impressions() -> list[dict[str, Any]]:
                    i.queued_at, i.legacy, i.features_json,
                    (
                        SELECT h.action FROM listening_history h
-                       WHERE h.impression_id = i.impression_id
+                       WHERE h.profile_id = i.profile_id
+                         AND h.impression_id = i.impression_id
                          AND h.action IN ('like', 'dislike')
                        ORDER BY h.ts DESC LIMIT 1
                    ) AS explicit_action
             FROM recommendation_impressions i
-            WHERE i.legacy = 0
+            WHERE i.profile_id = :profile
+              AND i.legacy = 0
               AND i.played_at IS NOT NULL
             ORDER BY COALESCE(i.closed_at, i.played_at, i.queued_at)
-            """
+            """,
+            {"profile": conn.profile_id},
         ).fetchall()
     labeled: list[dict[str, Any]] = []
     for row in rows:
@@ -121,9 +125,10 @@ def last_completed_label_count() -> int:
             """
             SELECT positive_count, negative_count
             FROM training_runs
-            WHERE model_type='ranker' AND status='completed'
+            WHERE profile_id = :profile AND model_type='ranker' AND status='completed'
             ORDER BY created_at DESC LIMIT 1
-            """
+            """,
+            {"profile": conn.profile_id},
         ).fetchone()
     if row is None:
         return 0
@@ -242,22 +247,21 @@ def _record_run(
               run_id, model_version, model_type, feature_schema_version,
               train_from, train_until, positive_count, negative_count,
               metrics_schema_version, metrics_json, status, created_at, completed_at
-            ) VALUES (?, ?, 'ranker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            , profile_id) VALUES (
+              :run_id, :model_version, 'ranker', :feature_schema_version,
+              :train_from, :train_until, :positive, :negative,
+              :metrics_schema_version, :metrics, :status, :now, :now, :profile
+            )
             """,
-            (
-                run_id,
-                model_version,
-                FEATURE_SCHEMA_VERSION,
-                train_from,
-                train_until,
-                positive,
-                negative,
-                METRICS_SCHEMA_VERSION,
-                json.dumps(metrics, ensure_ascii=False),
-                status,
-                now,
-                now,
-            ),
+            {
+                "run_id": run_id, "model_version": model_version,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "train_from": train_from, "train_until": train_until,
+                "positive": positive, "negative": negative,
+                "metrics_schema_version": METRICS_SCHEMA_VERSION,
+                "metrics": json.dumps(metrics, ensure_ascii=False),
+                "status": status, "now": now, "profile": conn.profile_id,
+            },
         )
 
 
@@ -265,16 +269,21 @@ def _activate_model(model_version: str, path: Path, digest: str) -> None:
     now = utcnow()
     with connect() as conn:
         conn.execute(
-            "UPDATE model_versions SET status='retired' WHERE model_type='ranker' AND status='active'"
+            "UPDATE model_versions SET status='retired' "
+            "WHERE profile_id = :profile AND model_type='ranker' AND status='active'",
+            {"profile": conn.profile_id},
         )
         conn.execute(
             """
             INSERT INTO model_versions(
               model_version, model_type, feature_schema_version, artifact_path,
               artifact_hash, status, created_at, activated_at
-            ) VALUES (?, 'ranker', ?, ?, ?, 'active', ?, ?)
+            , profile_id) VALUES (
+              :model_version, 'ranker', :feature_schema_version, :path, :digest, 'active', :now, :now, :profile
+            )
             """,
-            (model_version, FEATURE_SCHEMA_VERSION, str(path), digest, now, now),
+            {"model_version": model_version, "feature_schema_version": FEATURE_SCHEMA_VERSION,
+             "path": str(path), "digest": digest, "now": now, "profile": conn.profile_id},
         )
 
 
@@ -402,6 +411,12 @@ def train_ranker(*, force: bool = False, artifact_path: Path | None = None) -> d
     }
     settings = get_settings()
     path = artifact_path or (settings.data_dir / "models" / "ranker.json")
+    if artifact_path is None and settings.multi_user:
+        profile_id = active_profile.get()
+        if profile_id is None:
+            with connect() as conn:
+                profile_id = conn.profile_id
+        path = settings.data_dir / "models" / "profiles" / profile_id / "ranker.json"
     write_model_atomic(path, payload)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     _activate_model(model_version, path, digest)
@@ -417,7 +432,3 @@ def train_ranker(*, force: bool = False, artifact_path: Path | None = None) -> d
         "artifact_hash": digest,
         **metrics,
     }
-
-
-def default_model_path() -> Path:
-    return DEFAULT_MODEL_PATH

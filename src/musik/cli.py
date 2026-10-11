@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -40,7 +41,7 @@ playlist_app = typer.Typer(help="Генерация плейлистов (Daily/
 listen_app = typer.Typer(help="История слушания, лайки и скипы")
 jobs_app = typer.Typer(help="Фоновые задачи (очередь jobs)")
 discover_app = typer.Typer(help="Discover: подсказки альбомов")
-db_app = typer.Typer(help="Управление схемой SQLite")
+db_app = typer.Typer(help="Управление схемой SQLite/PostgreSQL")
 app.add_typer(playlist_app, name="playlist")
 app.add_typer(listen_app, name="listen")
 app.add_typer(jobs_app, name="jobs")
@@ -295,14 +296,34 @@ def init() -> None:
 
 @db_app.command("migrate")
 def db_migrate(
-    path: Optional[Path] = typer.Option(None, "--path", help="Путь к SQLite (default MUSIK_DB_PATH)"),
+    path: Optional[Path] = typer.Option(None, "--path", help="Путь к SQLite вместо MUSIK_DATABASE_URL"),
 ) -> None:
-    """Применить все пронумерованные миграции; повторный запуск безопасен."""
-    from musik.db.migrations import LATEST_SCHEMA_VERSION, migrate_db
+    """Применить общую версионированную схему; повторный запуск безопасен."""
+    from musik.db.migrations import LATEST_SCHEMA_VERSION, migrate_database
 
-    db_path = path or get_settings().db_path
-    version = migrate_db(db_path)
-    console.print(f"DB schema ready: {db_path} (version {version}/{LATEST_SCHEMA_VERSION})")
+    settings = get_settings()
+    target_path = path or settings.db_path
+    database_url = None if path is not None else settings.database_url
+    version = migrate_database(database_url, target_path)
+    target = str(path) if path is not None else ("postgresql" if database_url else str(target_path))
+    console.print(f"DB schema ready: {target} (version {version}/{LATEST_SCHEMA_VERSION})")
+
+
+@db_app.command("transfer")
+def db_transfer(
+    source: Path = typer.Option(..., "--source", help="Остановленная SQLite база или ее backup"),
+    destination: str = typer.Option(..., "--destination", help="PostgreSQL URL назначения"),
+    report: Optional[Path] = typer.Option(None, "--report", help="Путь для JSON-отчета сверки"),
+) -> None:
+    """Проверенно скопировать SQLite v7 в пустой PostgreSQL, не меняя источник."""
+    from musik.db.transfer import transfer_sqlite_to_postgres
+
+    result = transfer_sqlite_to_postgres(source, destination)
+    encoded = json.dumps(result, ensure_ascii=False, indent=2)
+    if report is not None:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(encoded + "\n", encoding="utf-8")
+    console.print(encoded)
 
 
 @db_app.command("rebuild-transitions")
@@ -310,23 +331,22 @@ def db_rebuild_transitions(
     path: Optional[Path] = typer.Option(None, "--path", help="Путь к SQLite"),
 ) -> None:
     """Пересобрать transition_stats из event log."""
-    import sqlite3
+    from musik.db.schema import connect
 
-    from musik.db.migrations import migrate_db
+    from musik.db.schema import init_db
 
-    db_path = path or get_settings().db_path
-    migrate_db(db_path)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("DELETE FROM transition_stats")
+    init_db(path)
+    with connect(path) as conn:
+        profile = {"profile": conn.profile_id}
+        conn.execute("DELETE FROM transition_stats WHERE profile_id = :profile", profile)
         rows = conn.execute(
             """
             SELECT track_id, action, COALESCE(reason,''), COALESCE(source,''), ts, COALESCE(session_id,'')
             FROM listening_history
-            WHERE action IN ('track_end','skip','finish')
-            ORDER BY session_id, ts
-            """
+            WHERE profile_id = :profile AND action IN ('track_end','skip','finish')
+            ORDER BY COALESCE(session_id,''), ts
+            """,
+            profile,
         ).fetchall()
         prev: dict[str, int] = {}
         n = 0
@@ -354,24 +374,26 @@ def db_rebuild_transitions(
                     INSERT INTO transition_stats(
                       from_id, to_id, manual_count, radio_count, finished_count,
                       partial_count, skip_count, decayed_weight, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(from_id, to_id) DO UPDATE SET
-                      manual_count = manual_count + excluded.manual_count,
-                      radio_count = radio_count + excluded.radio_count,
-                      finished_count = finished_count + excluded.finished_count,
-                      partial_count = partial_count + excluded.partial_count,
-                      skip_count = skip_count + excluded.skip_count,
-                      decayed_weight = decayed_weight + excluded.decayed_weight,
+                    , profile_id) VALUES (
+                      :from_id, :to_id, :manual, :radio, :finished, :partial, :skip, :delta, :ts, :profile
+                    )
+                    ON CONFLICT(profile_id, from_id, to_id) DO UPDATE SET
+                      manual_count = transition_stats.manual_count + excluded.manual_count,
+                      radio_count = transition_stats.radio_count + excluded.radio_count,
+                      finished_count = transition_stats.finished_count + excluded.finished_count,
+                      partial_count = transition_stats.partial_count + excluded.partial_count,
+                      skip_count = transition_stats.skip_count + excluded.skip_count,
+                      decayed_weight = transition_stats.decayed_weight + excluded.decayed_weight,
                       updated_at = excluded.updated_at
                     """,
-                    (from_id, track_id, manual, radio, finished, partial, skip, delta, row[4]),
+                    {"from_id": from_id, "to_id": track_id, "manual": manual, "radio": radio,
+                     "finished": finished, "partial": partial, "skip": skip, "delta": delta,
+                     "ts": row[4], **profile},
                 )
                 n += 1
             prev[session] = track_id
         conn.commit()
         console.print(f"Rebuilt {n} transition edges")
-    finally:
-        conn.close()
 
 
 @app.command("lyrics")
@@ -435,6 +457,100 @@ def lyrics_cmd(
         table.add_row(k, str(v))
     console.print(table)
 
+
+@app.command("artwork")
+def artwork_cmd(
+    limit: Optional[int] = typer.Option(None, "--limit", help="Сколько треков обработать"),
+    force: bool = typer.Option(False, "--force", help="Перекачать даже если обложка уже есть"),
+    track: Optional[str] = typer.Option(
+        None, "--track", "-t", help="Один трек: id или поисковая строка"
+    ),
+    delay: float = typer.Option(
+        3.0, "--delay", help="Пауза между запросами к iTunes (сек); быстрее ~20/мин — HTTP 429"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Скачать обложки альбомов из интернета (iTunes Search API)."""
+    _setup_logging(verbose)
+    ensure_db()
+    from musik.artwork import fetch_library_artwork
+    from musik.artwork.online import fetch_cover
+    from musik.artwork.pipeline import save_cover
+    from musik.db.store import save_artwork_path
+
+    if track:
+        tid = _resolve_track_arg(track)
+        meta = get_track(tid)
+        if not meta:
+            console.print(f"[red]Нет трека {tid}[/red]")
+            raise typer.Exit(1)
+        hit = fetch_cover(
+            artist=meta.get("artist") or "",
+            album=meta.get("album") or "",
+        )
+        if hit is None:
+            console.print("[yellow]Обложка не найдена[/yellow]")
+            raise typer.Exit(2)
+        md5 = meta.get("file_md5")
+        if not md5:
+            console.print("[red]У трека нет file_md5[/red]")
+            raise typer.Exit(1)
+        path = save_cover(str(md5), hit)
+        save_artwork_path(tid, path)
+        console.print(f"[green]OK[/green] track={tid} -> {path}")
+        return
+
+    result = fetch_library_artwork(limit=limit, force=force, delay_sec=delay)
+    table = Table(title="Artwork result")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k, v in [
+        ("from folders", result.local),
+        ("queued", result.total),
+        ("found", result.found),
+        ("missing", result.missing),
+        ("failed", result.failed),
+    ]:
+        table.add_row(k, str(v))
+    console.print(table)
+    if result.rate_limited:
+        console.print(
+            "[red]iTunes ограничил запросы (HTTP 429/403) — прогон остановлен. "
+            "Запусти позже, уже скачанные обложки пропустятся.[/red]"
+        )
+        raise typer.Exit(3)
+
+
+
+@app.command("artist-photos")
+def artist_photos_cmd(
+    limit: Optional[int] = typer.Option(None, "--limit", help="Сколько артистов обработать"),
+    force: bool = typer.Option(
+        False, "--force", help="Искать заново, включая уже найденных и ненайденных"
+    ),
+    delay: float = typer.Option(0.5, "--delay", help="Пауза между запросами к Deezer (сек)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Скачать фото артистов из интернета (Deezer API)."""
+    _setup_logging(verbose)
+    ensure_db()
+    from musik.artwork.artists import fetch_library_artist_photos
+
+    result = fetch_library_artist_photos(limit=limit, force=force, delay_sec=delay)
+    table = Table(title="Artist photos")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k, v in [
+        ("queued", result.total),
+        ("found", result.found),
+        ("missing", result.missing),
+        ("failed", result.failed),
+    ]:
+        table.add_row(k, str(v))
+    console.print(table)
+    if result.rate_limited:
+        console.print("[red]Deezer ограничил запросы — прогон остановлен, запусти позже.[/red]")
+        raise typer.Exit(3)
 
 def _print_playlist(pl: dict) -> None:
     console.print(f"[bold]#{pl['id']}[/bold] [{pl['kind']}] {pl['name']}  ({pl['created_at']})")

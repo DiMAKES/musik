@@ -57,9 +57,11 @@ def build_profile(*, context: str = CONTEXT_OFFLINE, persist: bool = True) -> Ta
         rows = conn.execute(
             """
             SELECT track_id, action FROM listening_history
+            WHERE profile_id = :profile
             ORDER BY id DESC
             LIMIT 500
-            """
+            """,
+            {"profile": conn.profile_id},
         ).fetchall()
 
     if not rows:
@@ -98,10 +100,10 @@ def build_profile(*, context: str = CONTEXT_OFFLINE, persist: bool = True) -> Ta
         with connect() as conn:
             conn.execute(
                 """
-                INSERT INTO user_profile_snapshots(context, embedding, created_at)
-                VALUES (?,?,?)
+                INSERT INTO user_profile_snapshots(context, embedding, created_at, profile_id)
+                VALUES (:context, :embedding, :now, :profile)
                 """,
-                (write_context, blob, utcnow()),
+                {"context": write_context, "embedding": blob, "now": utcnow(), "profile": conn.profile_id},
             )
     return TasteProfile(vec, n_pos, n_neg, write_context)
 
@@ -111,10 +113,10 @@ def latest_profile(context: str = CONTEXT_ONLINE) -> TasteProfile | None:
         row = conn.execute(
             """
             SELECT embedding FROM user_profile_snapshots
-            WHERE context = ?
+            WHERE profile_id = :profile AND context = :context
             ORDER BY id DESC LIMIT 1
             """,
-            (context,),
+            {"profile": conn.profile_id, "context": context},
         ).fetchone()
     if not row:
         return None

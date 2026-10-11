@@ -13,21 +13,21 @@ import (
 const ExportSchemaVersion = 1
 
 type ExportDoc struct {
-	SchemaVersion int            `json:"schema_version"`
-	Name          string         `json:"name"`
-	Type          string         `json:"type"`
-	Description   string         `json:"description,omitempty"`
-	RuleJSON      string         `json:"rule_json,omitempty"`
-	Tracks        []ExportTrack  `json:"tracks"`
+	SchemaVersion int           `json:"schema_version"`
+	Name          string        `json:"name"`
+	Type          string        `json:"type"`
+	Description   string        `json:"description,omitempty"`
+	RuleJSON      string        `json:"rule_json,omitempty"`
+	Tracks        []ExportTrack `json:"tracks"`
 }
 
 type ExportTrack struct {
-	Artist   string `json:"artist,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Album    string `json:"album,omitempty"`
+	Artist   string  `json:"artist,omitempty"`
+	Title    string  `json:"title,omitempty"`
+	Album    string  `json:"album,omitempty"`
 	Duration float64 `json:"duration,omitempty"`
-	Note     string `json:"note,omitempty"`
-	Path     string `json:"path,omitempty"`
+	Note     string  `json:"note,omitempty"`
+	Path     string  `json:"path,omitempty"`
 }
 
 func ExportJSON(pl *db.UserPlaylist, includePaths bool) ([]byte, error) {
@@ -154,7 +154,7 @@ func ResolveImport(store *db.Store, doc ExportDoc) []db.UserPlaylistItem {
 			UnresolvedTitle:  tr.Title,
 			UnresolvedPath:   tr.Path,
 		}
-		if id, ok := matchTrack(store, tr); ok {
+		if id, ok, err := store.MatchTrack(tr.Artist, tr.Title, tr.Path); err == nil && ok {
 			item.TrackID = id
 		} else {
 			item.Unresolved = true
@@ -162,31 +162,6 @@ func ResolveImport(store *db.Store, doc ExportDoc) []db.UserPlaylistItem {
 		items = append(items, item)
 	}
 	return items
-}
-
-func matchTrack(store *db.Store, tr ExportTrack) (int64, bool) {
-	if tr.Artist != "" && tr.Title != "" {
-		var id int64
-		err := store.DB.QueryRow(`
-SELECT id FROM tracks
-WHERE is_active = 1 AND lower(trim(artist)) = lower(?) AND lower(trim(title)) = lower(?)
-ORDER BY id LIMIT 1`, tr.Artist, tr.Title).Scan(&id)
-		if err == nil {
-			return id, true
-		}
-	}
-	if tr.Path != "" {
-		base := filepath.Base(tr.Path)
-		var id int64
-		err := store.DB.QueryRow(`
-SELECT id FROM tracks
-WHERE is_active = 1 AND (path = ? OR path LIKE ?)
-ORDER BY id LIMIT 1`, tr.Path, "%"+base).Scan(&id)
-		if err == nil {
-			return id, true
-		}
-	}
-	return 0, false
 }
 
 func firstNonEmpty(values ...string) string {

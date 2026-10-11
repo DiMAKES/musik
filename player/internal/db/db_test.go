@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,16 +17,157 @@ import (
 
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
+	store, _, path := openTestTarget(t)
+	return store, path
+}
+
+// openTestTarget also returns the database URL, for tests that open a second
+// independent pool (as the Python worker does).
+func openTestTarget(t *testing.T) (*Store, string, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "musik-test.db")
-	if err := testdb.Create(path); err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(path)
+	databaseURL, path := testdb.Target(t, path)
+	store, err := OpenDatabase(databaseURL, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	return store, path
+	return store, databaseURL, path
+}
+
+func TestPostgreSQLStoreWhenConfigured(t *testing.T) {
+	databaseURL := os.Getenv("MUSIK_TEST_POSTGRES_URL")
+	if databaseURL == "" {
+		t.Skip("set MUSIK_TEST_POSTGRES_URL to run PostgreSQL conformance smoke test")
+	}
+	store, err := OpenDatabase(databaseURL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Dialect != "postgres" {
+		t.Fatalf("database dialect = %q, want postgres", store.Dialect)
+	}
+	if _, err := store.OutcomeMetrics(7); err != nil {
+		t.Fatalf("PostgreSQL metrics query failed: %v", err)
+	}
+
+	payload := `{"test":true}`
+	id, err := store.EnqueueJob("store-smoke-"+NewID(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.GetJob(id)
+	if err != nil || job == nil || job.Payload != payload {
+		t.Fatalf("job roundtrip = %#v, %v", job, err)
+	}
+	if _, err := store.DB.Exec(`DELETE FROM jobs WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	playlist, err := store.CreateUserPlaylist(UserPlaylist{Name: "store-smoke-" + NewID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if playlist.ID == 0 {
+		t.Fatal("playlist insert did not return the PostgreSQL ID")
+	}
+	if _, err := store.DB.Exec(`DELETE FROM playlists WHERE id = ?`, playlist.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostgreSQLProfilesAreIsolatedWhenConfigured(t *testing.T) {
+	databaseURL := os.Getenv("MUSIK_TEST_POSTGRES_URL")
+	if databaseURL == "" {
+		t.Skip("set MUSIK_TEST_POSTGRES_URL to run PostgreSQL profile tests")
+	}
+	store, err := OpenDatabase(databaseURL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	userID, mainProfile, err := store.CreateUserWithDefaultProfile(ctx, "PostgreSQL isolation test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.CreateProfile(ctx, userID, "Secondary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := store.DB.Exec(`DELETE FROM playlists WHERE profile_id IN (?,?)`, mainProfile.ID, secondary.ID); err != nil {
+			t.Errorf("clean test playlists: %v", err)
+		}
+		if _, err := store.DB.Exec(`DELETE FROM user_roles WHERE user_id=?`, userID); err != nil {
+			t.Errorf("clean test roles: %v", err)
+		}
+		if _, err := store.DB.Exec(`DELETE FROM profiles WHERE id IN (?,?) AND owner_user_id=?`, mainProfile.ID, secondary.ID, userID); err != nil {
+			t.Errorf("clean test profiles: %v", err)
+		}
+		if _, err := store.DB.Exec(`DELETE FROM users WHERE id=?`, userID); err != nil {
+			t.Errorf("clean test user: %v", err)
+		}
+	}()
+	mainStore := store.ForProfile(mainProfile.ID)
+	secondaryStore := store.ForProfile(secondary.ID)
+	if _, err := mainStore.CreateUserPlaylist(UserPlaylist{Name: "main-" + NewID()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondaryStore.CreateUserPlaylist(UserPlaylist{Name: "secondary-" + NewID()}); err != nil {
+		t.Fatal(err)
+	}
+	mainLists, err := mainStore.ListUserPlaylists(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondaryLists, err := secondaryStore.ListUserPlaylists(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mainLists) != 1 || len(secondaryLists) != 1 || mainLists[0].Name == secondaryLists[0].Name {
+		t.Fatalf("profile playlists crossed scopes: main=%#v secondary=%#v", mainLists, secondaryLists)
+	}
+}
+
+// Runs on a fresh database of the selected backend (MUSIK_TEST_BACKEND).
+func TestOIDCInvitationProvisioning(t *testing.T) {
+	store, _, _ := openTestTarget(t)
+	ctx := context.Background()
+	issuer := "https://idp.example.test/realms/musik"
+	secret, err := store.BootstrapInvitation(ctx, issuer, time.Hour)
+	if err != nil {
+		t.Fatalf("bootstrap invitation: %v", err)
+	}
+	identity := VerifiedIdentity{
+		Issuer: issuer, Subject: "postgres-integration-user",
+		DisplayName: "PostgreSQL integration user", Email: "pg-test@example.test", EmailVerified: true,
+	}
+	userID, profile, err := store.AcceptInvitation(ctx, secret, identity)
+	if err != nil {
+		t.Fatalf("accept bootstrap invitation: %v", err)
+	}
+	if ok, err := store.UserIsAdmin(ctx, userID); err != nil || !ok {
+		t.Fatalf("bootstrapped owner admin = %v, %v", ok, err)
+	}
+	if linkedUser, err := store.IdentityUser(ctx, issuer, identity.Subject); err != nil || linkedUser != userID {
+		t.Fatalf("identity lookup = %q, %v; want %q", linkedUser, err, userID)
+	}
+	token, _, err := store.IssueUserSession(ctx, userID, time.Hour)
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+	gotUser, gotProfile, err := store.UserSession(ctx, token)
+	if err != nil || gotUser != userID || gotProfile.ID != profile.ID {
+		t.Fatalf("session principal = %q/%q, %v; want %q/%q", gotUser, gotProfile.ID, err, userID, profile.ID)
+	}
+	if err := store.RevokeUserSession(ctx, token); err != nil {
+		t.Fatalf("revoke session: %v", err)
+	}
+	if _, _, err := store.UserSession(ctx, token); !errors.Is(err, ErrProfileNotFound) {
+		t.Fatalf("revoked session error = %v, want ErrProfileNotFound", err)
+	}
 }
 
 func TestMondayZeroWeekday(t *testing.T) {
@@ -56,7 +200,7 @@ func TestOpenRequiresExactMigratedSchemaVersion(t *testing.T) {
 		if err := conn.Close(); err != nil {
 			t.Fatal(err)
 		}
-		_, err = Open(path)
+		_, err = OpenDatabase("", path)
 		if err == nil {
 			t.Fatalf("Open accepted schema version %d", version)
 		}
@@ -70,22 +214,39 @@ func TestLatestPlaylistSelectsNewestAndPreservesPositions(t *testing.T) {
 	store, _ := openTestStore(t)
 	for id := int64(1); id <= 3; id++ {
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title, artist, duration) VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO tracks(id, path, title, artist, duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 			id, fmt.Sprintf("/track-%d.flac", id), fmt.Sprintf("Track %d", id), "Artist", 180,
 		); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.DB.Exec(`
-		INSERT INTO playlists(id, kind, name, created_at) VALUES
-			(10, 'daily', 'Old', '2026-08-14T00:00:00Z'),
-			(11, 'daily', 'New', '2026-08-15T00:00:00Z'),
-			(12, 'weekly', 'Other kind', '2026-08-16T00:00:00Z');
-		INSERT INTO playlist_tracks(playlist_id, position, track_id, explanation) VALUES
-			(10, 0, 1, 'old'),
-			(11, 7, 2, 'second'),
-			(11, 3, 3, 'first')`); err != nil {
-		t.Fatal(err)
+	for _, playlist := range []struct {
+		id         int64
+		kind, name string
+		createdAt  string
+	}{
+		{10, "daily", "Old", "2026-08-14T00:00:00Z"},
+		{11, "daily", "New", "2026-08-15T00:00:00Z"},
+		{12, "weekly", "Other kind", "2026-08-16T00:00:00Z"},
+	} {
+		if _, err := store.DB.Exec(
+			`INSERT INTO playlists(id, kind, name, created_at, profile_id) VALUES (?,?,?,?,?)`,
+			playlist.id, playlist.kind, playlist.name, playlist.createdAt, store.ProfileID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, item := range []struct {
+		playlistID, position, trackID int64
+		explanation                   string
+	}{{10, 0, 1, "old"}, {11, 7, 2, "second"}, {11, 3, 3, "first"}} {
+		if _, err := store.DB.Exec(
+			`INSERT INTO playlist_tracks(item_id, playlist_id, position, track_id, explanation, added_at, profile_id)
+VALUES (?,?,?,?,?,?,?)`,
+			NewID(), item.playlistID, item.position, item.trackID, item.explanation, "2026-08-15T00:00:00Z", store.ProfileID,
+		); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	playlist, err := store.LatestPlaylist("daily")
@@ -107,8 +268,8 @@ func TestLatestPlaylistSelectsNewestAndPreservesPositions(t *testing.T) {
 }
 
 func TestConcurrentWorkerAndEventWrites(t *testing.T) {
-	store, path := openTestStore(t)
-	if _, err := store.DB.Exec(`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`); err != nil {
+	store, databaseURL, path := openTestTarget(t)
+	if _, err := store.DB.Exec(`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	jobID, err := store.EnqueueJob("mix_pack", `{}`)
@@ -116,12 +277,11 @@ func TestConcurrentWorkerAndEventWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	worker, err := sql.Open("sqlite",
-		"file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	// The worker is an independent process: give it its own connection pool.
+	worker, err := OpenDatabase(databaseURL, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = worker.Close() })
 
 	const writes = 40
@@ -131,7 +291,7 @@ func TestConcurrentWorkerAndEventWrites(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < writes; i++ {
-			_, err := worker.Exec(
+			_, err := worker.DB.Exec(
 				`UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?`,
 				"running", time.Now().UTC().Format(time.RFC3339Nano), jobID,
 			)
@@ -179,7 +339,7 @@ func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
 	store, _ := openTestStore(t)
 	for id := int64(1); id <= 2; id++ {
 		if _, err := store.DB.Exec(
-			`INSERT INTO tracks(id, path, title) VALUES (?, ?, ?)`,
+			`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 			id, fmt.Sprintf("/track-%d.flac", id), fmt.Sprintf("Track %d", id),
 		); err != nil {
 			t.Fatal(err)
@@ -236,7 +396,7 @@ func TestRecommendationImpressionsJoinOutcomes(t *testing.T) {
 func TestLifecycleEventsAreIdempotent(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -289,10 +449,174 @@ func TestLifecycleEventsAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestStatsUpsertsRemainIdempotentAcrossBackends(t *testing.T) {
+	type testStore struct {
+		name  string
+		store *Store
+	}
+	local, _ := openTestStore(t)
+	stores := []testStore{{name: "sqlite", store: local}}
+	if databaseURL := os.Getenv("MUSIK_TEST_POSTGRES_URL"); databaseURL != "" {
+		postgresStore, err := OpenDatabase(databaseURL, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = postgresStore.Close() })
+		_, profile, err := postgresStore.CreateUserWithDefaultProfile(context.Background(), "Stats upsert test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores = append(stores, testStore{name: "postgres", store: postgresStore.ForProfile(profile.ID)})
+	}
+
+	for _, backend := range stores {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.store
+			trackID := time.Now().UnixNano()%500_000_000 + 1_500_000_000
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			nextTrackID := trackID + 1
+			if store.Dialect == "postgres" {
+				if err := store.DB.QueryRow(`SELECT nextval(pg_get_serial_sequence('tracks','id'))`).Scan(&trackID); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.DB.QueryRow(`SELECT nextval(pg_get_serial_sequence('tracks','id'))`).Scan(&nextTrackID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for offset, title := range []string{"Stats test", "Stats next"} {
+				id := trackID
+				if offset != 0 {
+					id = nextTrackID
+				}
+				var err error
+				if store.Dialect == "postgres" {
+					_, err = store.DB.Exec(
+						`INSERT INTO tracks(id,path,title,created_at,updated_at) VALUES (?,?,?,?,?)`,
+						id, fmt.Sprintf("/stats-%d.flac", id), title, now, now,
+					)
+				} else {
+					_, err = store.DB.Exec(
+						`INSERT INTO tracks(id,path,title, created_at, updated_at) VALUES (?,?,?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+						id, fmt.Sprintf("/stats-%d.flac", id), title,
+					)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			for _, bump := range [][3]int{{2, 1, 0}, {3, 2, 1}} {
+				if err := store.BumpRecStats(trackID, bump[0], bump[1], bump[2]); err != nil {
+					t.Fatalf("BumpRecStats: %v", err)
+				}
+			}
+			var shown, skips, completed int
+			if err := store.DB.QueryRow(
+				`SELECT shown, skipped_early, completed FROM rec_stats WHERE track_id=? AND profile_id=?`,
+				trackID, store.ProfileID,
+			).Scan(&shown, &skips, &completed); err != nil {
+				t.Fatal(err)
+			}
+			if shown != 5 || skips != 3 || completed != 1 {
+				t.Fatalf("recommendation stats=%d/%d/%d, want 5/3/1", shown, skips, completed)
+			}
+
+			if err := store.BumpTransition(trackID, nextTrackID, 0.5); err != nil {
+				t.Fatalf("first BumpTransition: %v", err)
+			}
+			if err := store.BumpTransition(trackID, nextTrackID, 1.25); err != nil {
+				t.Fatalf("second BumpTransition: %v", err)
+			}
+			var weight float64
+			if err := store.DB.QueryRow(
+				`SELECT weight FROM transitions WHERE from_id=? AND to_id=? AND profile_id=?`,
+				trackID, nextTrackID, store.ProfileID,
+			).Scan(&weight); err != nil || weight != 1.75 {
+				t.Fatalf("transition weight=%v err=%v, want 1.75", weight, err)
+			}
+
+			requestID, impressionID := NewID(), NewID()
+			sessionID := "stats-" + NewID()
+			if err := store.CreateRecommendationRequest(RecommendationRequest{
+				RequestID: requestID, SessionID: sessionID, Reason: "stats-test",
+				PolicyVersion: "test", CandidateCount: 1,
+			}, []RecommendationImpression{{
+				ImpressionID: impressionID, RequestID: requestID, SessionID: sessionID,
+				TrackID: trackID, Source: "radio_start", Explore: true, NewBoost: true,
+			}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			start := LifecycleEvent{
+				EventID: NewID(), Type: "track_start", TrackID: trackID,
+				SessionID: sessionID, ImpressionID: impressionID, RequestID: requestID,
+			}
+			first, err := store.ApplyLifecycleEvent(start)
+			if err != nil || !first.Inserted || !first.LifecycleChanged {
+				t.Fatalf("first track_start=%+v err=%v", first, err)
+			}
+			retry, err := store.ApplyLifecycleEvent(start)
+			if err != nil || retry.Inserted || retry.LifecycleChanged {
+				t.Fatalf("duplicate track_start=%+v err=%v", retry, err)
+			}
+			end := LifecycleEvent{
+				EventID: NewID(), Type: "track_end", TrackID: trackID,
+				SessionID: sessionID, ImpressionID: impressionID, RequestID: requestID,
+				Outcome: "finished", ListenedRatio: 0.95,
+			}
+			firstEnd, err := store.ApplyLifecycleEvent(end)
+			if err != nil || !firstEnd.Inserted || !firstEnd.LifecycleChanged {
+				t.Fatalf("first track_end=%+v err=%v", firstEnd, err)
+			}
+			end.EventID = NewID()
+			retryEnd, err := store.ApplyLifecycleEvent(end)
+			if err != nil || !retryEnd.Inserted || retryEnd.LifecycleChanged {
+				t.Fatalf("duplicate lifecycle transition=%+v err=%v", retryEnd, err)
+			}
+			like := LifecycleEvent{
+				EventID: NewID(), Type: "like", TrackID: trackID,
+				SessionID: sessionID, ImpressionID: impressionID, RequestID: requestID,
+			}
+			if result, err := store.ApplyLifecycleEvent(like); err != nil || !result.LifecycleChanged {
+				t.Fatalf("first like=%+v err=%v", result, err)
+			}
+			like.EventID = NewID()
+			if result, err := store.ApplyLifecycleEvent(like); err != nil || result.LifecycleChanged {
+				t.Fatalf("duplicate like transition=%+v err=%v", result, err)
+			}
+			var plays, finishes, likes int
+			if err := store.DB.QueryRow(
+				`SELECT plays, finishes, likes FROM track_stats WHERE track_id=? AND profile_id=?`,
+				trackID, store.ProfileID,
+			).Scan(&plays, &finishes, &likes); err != nil {
+				t.Fatal(err)
+			}
+			if plays != 1 || finishes != 1 || likes != 1 {
+				t.Fatalf("lifecycle stats=%d/%d/%d, want 1/1/1", plays, finishes, likes)
+			}
+
+			for range 2 {
+				if err := store.RecordOutcomeTransition(trackID, nextTrackID, "finished", "radio"); err != nil {
+					t.Fatalf("RecordOutcomeTransition: %v", err)
+				}
+			}
+			var radioCount, finishedCount int
+			if err := store.DB.QueryRow(
+				`SELECT radio_count, finished_count FROM transition_stats WHERE from_id=? AND to_id=? AND profile_id=?`,
+				trackID, nextTrackID, store.ProfileID,
+			).Scan(&radioCount, &finishedCount); err != nil {
+				t.Fatal(err)
+			}
+			if radioCount != 2 || finishedCount != 2 {
+				t.Fatalf("outcome transition counters=%d/%d, want 2/2", radioCount, finishedCount)
+			}
+		})
+	}
+}
+
 func TestLegacyFallbackRejectsAmbiguousPendingImpressions(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -315,16 +639,16 @@ func TestLegacyFallbackRejectsAmbiguousPendingImpressions(t *testing.T) {
 func TestBaselineStatusAndMetricBreakdowns(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title, artist) VALUES (1, '/track.flac', 'Track', 'Artist')`,
+		`INSERT INTO tracks(id, path, title, artist, created_at, updated_at) VALUES (1, '/track.flac', 'Track', 'Artist', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
 	requestID := NewID()
 	if _, err := store.DB.Exec(`
 INSERT INTO recommendation_requests(
-  request_id, session_id, reason, policy_version, candidate_count, latency_ms, created_at
-) VALUES (?, 's1', 'refill', 'test', 300, 1, datetime('now','-15 days'))`,
-		requestID); err != nil {
+  request_id, session_id, reason, policy_version, candidate_count, latency_ms, created_at, profile_id
+) VALUES (?, 's1', 'refill', 'test', 300, 1, ?, ?)`,
+		requestID, daysAgo(15), store.ProfileID); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < BaselineMinimumImpressions; i++ {
@@ -332,20 +656,19 @@ INSERT INTO recommendation_requests(
 		if i%4 == 0 {
 			outcome = "early_skip"
 		}
-		queued := "datetime('now','-15 days')"
+		queued := daysAgo(15)
 		if i > 0 {
-			queued = "datetime('now')"
+			queued = daysAgo(0)
 		}
-		query := fmt.Sprintf(`
+		if _, err := store.DB.Exec(`
 INSERT INTO recommendation_impressions(
   session_id, track_id, position, score, cosine_taste, cosine_current,
   explore, new_boost, maturity, mode, shown_at, impression_id, request_id,
-  source, queued_at, played_at, closed_at, outcome, listened_ratio, legacy
+  source, queued_at, played_at, closed_at, outcome, listened_ratio, legacy, profile_id
 ) VALUES (
-  's1', 1, ?, 0, 0, 0, 0, 0, 'ready', 'radio', %s, ?, ?,
-  'exploit', %s, %s, %s, ?, 0.9, 0
-)`, queued, queued, queued, queued)
-		if _, err := store.DB.Exec(query, i, NewID(), requestID, outcome); err != nil {
+  's1', 1, ?, 0, 0, 0, 0, 0, 'ready', 'radio', ?, ?, ?,
+  'exploit', ?, ?, ?, ?, 0.9, 0, ?
+)`, i, queued, NewID(), requestID, queued, queued, queued, outcome, store.ProfileID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -378,15 +701,15 @@ INSERT INTO recommendation_impressions(
 func TestMetricsExcludeLegacyManualAndShare(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title, artist) VALUES (1, '/track.flac', 'Track', 'Artist')`,
+		`INSERT INTO tracks(id, path, title, artist, created_at, updated_at) VALUES (1, '/track.flac', 'Track', 'Artist', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
 	requestID := NewID()
 	if _, err := store.DB.Exec(`
 INSERT INTO recommendation_requests(
-  request_id, session_id, reason, policy_version, candidate_count, latency_ms, created_at
-) VALUES (?, 's1', 'refill', 'test', 3, 1, datetime('now'))`, requestID); err != nil {
+  request_id, session_id, reason, policy_version, candidate_count, latency_ms, created_at, profile_id
+) VALUES (?, 's1', 'refill', 'test', 3, 1, ?, ?)`, requestID, daysAgo(0), store.ProfileID); err != nil {
 		t.Fatal(err)
 	}
 	rows := []struct {
@@ -403,11 +726,11 @@ INSERT INTO recommendation_requests(
 INSERT INTO recommendation_impressions(
   session_id, track_id, position, score, cosine_taste, cosine_current,
   explore, new_boost, maturity, mode, shown_at, impression_id, request_id,
-  source, queued_at, played_at, closed_at, outcome, listened_ratio, legacy
+  source, queued_at, played_at, closed_at, outcome, listened_ratio, legacy, profile_id
 ) VALUES (
-  's1', 1, ?, 0, 0, 0, 0, 0, 'ready', ?, datetime('now'), ?, ?,
-  ?, datetime('now'), datetime('now'), datetime('now'), ?, 0.9, ?
-)`, i, row.mode, NewID(), requestID, row.source, row.outcome, row.legacy); err != nil {
+  's1', 1, ?, 0, 0, 0, 0, 0, 'ready', ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, 0.9, ?, ?
+)`, i, row.mode, daysAgo(0), NewID(), requestID, row.source, daysAgo(0), daysAgo(0), daysAgo(0), row.outcome, row.legacy, store.ProfileID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -423,7 +746,7 @@ INSERT INTO recommendation_impressions(
 func TestLikeStatsAreIdempotentWithoutSameEventID(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +783,7 @@ func TestLikeStatsAreIdempotentWithoutSameEventID(t *testing.T) {
 func TestLatestPoliciesAndTrainingRuns(t *testing.T) {
 	store, _ := openTestStore(t)
 	if _, err := store.DB.Exec(
-		`INSERT INTO tracks(id, path, title) VALUES (1, '/track.flac', 'Track')`,
+		`INSERT INTO tracks(id, path, title, created_at, updated_at) VALUES (1, '/track.flac', 'Track', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -475,13 +798,16 @@ func TestLatestPoliciesAndTrainingRuns(t *testing.T) {
 	}}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB.Exec(`INSERT INTO model_versions(model_version,model_type,feature_schema_version,artifact_path,artifact_hash,status,created_at,profile_id) VALUES ('ranker-v2','ranker',1,'/test/ranker.json','hash','active',?,?)`, daysAgo(0), store.ProfileID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.DB.Exec(`
 INSERT INTO training_runs(
   run_id, model_version, model_type, feature_schema_version, train_from, train_until,
-  positive_count, negative_count, metrics_schema_version, metrics_json, status, created_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+  positive_count, negative_count, metrics_schema_version, metrics_json, status, created_at, profile_id
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		NewID(), "ranker-v2", "linear", 1, "2026-01-01", "2026-02-01",
-		12, 8, 1, `{"auc":0.71}`, "published",
+		12, 8, 1, `{"auc":0.71}`, "completed", daysAgo(0), store.ProfileID,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -493,10 +819,15 @@ INSERT INTO training_runs(
 		t.Fatalf("policy=%+v", policies[0])
 	}
 	runs, err := store.ListTrainingRuns(3)
-	if err != nil || len(runs) != 1 || runs[0].Status != "published" {
+	if err != nil || len(runs) != 1 || runs[0].Status != "completed" {
 		t.Fatalf("runs=%v err=%v", runs, err)
 	}
 	if runs[0].Metrics["auc"] != 0.71 {
 		t.Fatalf("metrics=%v", runs[0].Metrics)
 	}
+}
+
+// daysAgo formats an instant the way repositories store timestamps.
+func daysAgo(days int) string {
+	return time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339Nano)
 }
