@@ -4660,7 +4660,7 @@ function tokensFromForm() {
 
 function ensureThemeStylesheet(id) {
   if (!THEME_ID_RE.test(id) || id === "ember") return;
-  const href = `/themes/${id}.css?v=retro3`;
+  const href = `/themes/${id}.css?v=retro5`;
   if ([...document.querySelectorAll('link[rel="stylesheet"]')].some((link) => link.getAttribute("href") === href)) return;
   const link = document.createElement("link");
   link.rel = "stylesheet";

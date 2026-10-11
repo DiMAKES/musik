@@ -46,7 +46,7 @@
         var saved = JSON.parse(localStorage.getItem("musik_theme") || "null");
         if (saved && saved.id === "omarchy") saved.id = "retro";
         if (!saved || !/^[a-z][a-z0-9-]{0,31}$/.test(saved.id) || saved.id === "ember") return;
-        document.write('<link rel="stylesheet" href="/themes/' + saved.id + '.css?v=retro3">');
+        document.write('<link rel="stylesheet" href="/themes/' + saved.id + '.css?v=retro5">');
       } catch (e) {}
     })();
   </script>
@@ -607,6 +607,6 @@
     </div>
   </div>
   <div id="toast" class="toast" hidden></div>
-  <script src="/app.js?v=34659857a2"></script>
+  <script src="/app.js?v=36380a8319"></script>
 </body>
 </html>
