@@ -26,3 +26,11 @@
 
 #### Изменено
 - Go-тесты запускаются на схеме, выгруженной из миграций (`scripts/go_test_schema.py`), а не на устаревшем ручном дампе; `pytest` проверяет, что выгрузка актуальна — [`48d7410`](https://github.com/torwin-job/musik/commit/48d74104c01e3202325b3816f6dc1ace79bffd01) ([@anatoliiii](https://github.com/anatoliiii))
+
+### Загрузка архивов и поток для телефона
+
+#### Добавлено
+- Загрузка альбомов архивами ZIP, TAR и TAR.GZ: распаковка целиком или никак, только аудио, без ссылок и выхода за библиотеку, до 2000 файлов и 8 ГиБ — [`5fa6066`](https://github.com/torwin-job/musik/commit/5fa60661120b1692a76e2f50e122a224532e58d7) ([@anatoliiii](https://github.com/anatoliiii))
+
+#### Исправлено
+- Android не обрывает воспроизведение на первом Range-запросе: мобильная версия трека готовится до первого байта; перекодирование ограничено половиной ядер, кеш в памяти — 64 МиБ на процесс — [`5fa6066`](https://github.com/torwin-job/musik/commit/5fa60661120b1692a76e2f50e122a224532e58d7) ([@anatoliiii](https://github.com/anatoliiii))
