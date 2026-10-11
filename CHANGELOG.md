@@ -49,3 +49,20 @@
 
 #### Добавлено
 - Второй веб-интерфейс на выбор: разделы «Слушать / Поиск / Коллекция / Я», настроения и вкус на главной, полка игр, экран «Сейчас играет» с паспортом трека и объяснением выбора; переключается в «Профиль → Интерфейс», по умолчанию — `MUSIK_UI`, исходный интерфейс не меняется — [`8e917be`](https://github.com/torwin-job/musik/commit/8e917be58f7f5aff903d0f3999f9d4d30212ee56) ([@anatoliiii](https://github.com/anatoliiii))
+
+### PostgreSQL, несколько пользователей и общий индекс
+
+#### Добавлено
+- PostgreSQL как вторая база: профиль `postgres` в Compose, перенос из SQLite со сверкой строк и контрольных сумм (`MUSIK_IMPORT_SQLITE=1` или `musik db transfer`) — [`ae7e6e6`](https://github.com/torwin-job/musik/commit/ae7e6e632886a65e4015e623277fb5c9a2e4ab62) ([@anatoliiii](https://github.com/anatoliiii))
+- Несколько пользователей (`MUSIK_MULTI_USER=1`): аккаунты по приглашениям, вход по имени и паролю, смена пароля, профили со своей историей, избранным, плейлистами и настройками радио; OIDC как второй способ входа — [`ae7e6e6`](https://github.com/torwin-job/musik/commit/ae7e6e632886a65e4015e623277fb5c9a2e4ab62) ([@anatoliiii](https://github.com/anatoliiii))
+- Токены устройств, привязанные к профилю, с QR для приложения; вход телефона по имени и паролю через `POST /api/auth/token` — [`ae7e6e6`](https://github.com/torwin-job/musik/commit/ae7e6e632886a65e4015e623277fb5c9a2e4ab62) ([@anatoliiii](https://github.com/anatoliiii))
+- Сервис `migrate` в Compose (проверенная резервная копия, миграция, импорт, приглашение первого администратора) и `scripts/update-compose.sh --build` для своей сборки — [`ae7e6e6`](https://github.com/torwin-job/musik/commit/ae7e6e632886a65e4015e623277fb5c9a2e4ab62), [`55403ec`](https://github.com/torwin-job/musik/commit/55403ecb780322351de1bcbf82fa9b57fe79b768) ([@anatoliiii](https://github.com/anatoliiii))
+- Документация: `docs/UPGRADE.md` (пошаговое обновление), `docs/DEPLOY.md` (установка), `docs/CONFIG.md` (все переменные `.env`) — [`3edac3d`](https://github.com/torwin-job/musik/commit/3edac3d1c9df21b8008329187435fe5d2c105f16) ([@anatoliiii](https://github.com/anatoliiii))
+
+#### Изменено
+- Схема базы v14; миграции ведёт Alembic (`musik db migrate`), база v5 обновляется со всеми данными; установки с промежуточной ревизией `musik_8` тоже поддерживаются — [`ae7e6e6`](https://github.com/torwin-job/musik/commit/ae7e6e632886a65e4015e623277fb5c9a2e4ab62), [`5fa1406`](https://github.com/torwin-job/musik/commit/5fa140602c0e7a6119f15341f02e9fcef6d584c5) ([@anatoliiii](https://github.com/anatoliiii))
+- Player работает с базой через явный SQL (sqlx), worker — через SQLAlchemy; один каталог эмбеддингов на процесс вместо копии на профиль, перезагрузка дочитывает только изменённые эмбеддинги — [`ae7e6e6`](https://github.com/torwin-job/musik/commit/ae7e6e632886a65e4015e623277fb5c9a2e4ab62) ([@anatoliiii](https://github.com/anatoliiii))
+- Образы по умолчанию берутся из `ghcr.io/torwin-job` с тегом `latest` — [`55403ec`](https://github.com/torwin-job/musik/commit/55403ecb780322351de1bcbf82fa9b57fe79b768) ([@anatoliiii](https://github.com/anatoliiii))
+
+#### Исправлено
+- Ретро-тема размывает декор за читаемым содержимым — [`bd209d3`](https://github.com/torwin-job/musik/commit/bd209d3b0d7cc5ec6282b89f7b9b429e803bc5ed) ([@anatoliiii](https://github.com/anatoliiii))
